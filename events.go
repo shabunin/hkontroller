@@ -8,7 +8,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/hkontrol/hkontroller/log"
+	"github.com/shabunin/hkontroller/log"
 )
 
 // CharacteristicUpdate is sent to subscribers when accessory reports characteristic value change.

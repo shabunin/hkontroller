@@ -1,7 +1,7 @@
 package hkontroller
 
 import (
-	"github.com/hkontrol/hkontroller/log"
+	"github.com/shabunin/hkontroller/log"
 
 	"bytes"
 	"encoding/hex"

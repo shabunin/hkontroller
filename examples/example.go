@@ -3,7 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"github.com/hkontrol/hkontroller"
+	"github.com/shabunin/hkontroller"
 	"os"
 	"strconv"
 	"strings"

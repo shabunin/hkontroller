@@ -1,4 +1,4 @@
-module github.com/hkontrol/hkontroller
+module github.com/shabunin/hkontroller
 
 go 1.19
 

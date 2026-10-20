@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/hkontrol/dnssd"
-	"github.com/hkontrol/hkontroller/log"
+	"github.com/shabunin/hkontroller/log"
 	"io"
 	"net"
 	"net/http"

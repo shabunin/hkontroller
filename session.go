@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"github.com/hkontrol/hkontroller/chacha20poly1305"
-	"github.com/hkontrol/hkontroller/hkdf"
+	"github.com/shabunin/hkontroller/chacha20poly1305"
+	"github.com/shabunin/hkontroller/hkdf"
 	"io"
 	"sync"
 )

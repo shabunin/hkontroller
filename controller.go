@@ -8,7 +8,7 @@ import (
 
 	"github.com/hkontrol/dnssd"
 	_ "github.com/hkontrol/dnssd/log"
-	"github.com/hkontrol/hkontroller/log"
+	"github.com/shabunin/hkontroller/log"
 )
 
 type pairSetupPayload struct {
