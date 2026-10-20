@@ -64,7 +64,12 @@ func (d *Device) PairRemove(controllerId string) error {
 func (d *Device) Unpair() error {
 	log.Debug.Println("d.Unpair()")
 
-	d.emit("unpaired")
+	err := d.PairRemove(d.controllerId)
 
-	return d.PairRemove(d.controllerId)
+	// forget pairing even if request failed
+	if d.ctrl != nil {
+		d.ctrl.onUnpaired(d)
+	}
+
+	return err
 }

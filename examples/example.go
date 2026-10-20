@@ -317,7 +317,7 @@ func main() {
 				did := d.Name
 				for v := range watcher {
 					fmt.Println("EVENT from ", did,
-						" aid=", v.Args[0], ", iid=", v.Args[1], ", value=", v.Args[2])
+						" aid=", v.Aid, ", iid=", v.Iid, ", value=", v.Value)
 					if device == nil {
 						fmt.Print("> ")
 					} else {

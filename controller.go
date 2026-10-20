@@ -8,6 +8,7 @@ import (
 
 	"github.com/hkontrol/dnssd"
 	_ "github.com/hkontrol/dnssd/log"
+	"github.com/hkontrol/hkontroller/log"
 )
 
 type pairSetupPayload struct {
@@ -69,47 +70,44 @@ func (c *Controller) putDevice(dd *Device) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.devices[dd.Name] = dd
+}
 
-	devPairedCh := dd.OnPaired()
-	go func() {
-		for range devPairedCh {
-			fmt.Println("save pairing: ", dd.pairing)
-			c.st.SavePairing(dd.pairing)
-		}
-	}()
+// onPaired is called by device after successful /pair-setup.
+func (c *Controller) onPaired(dd *Device) {
+	log.Debug.Println("save pairing: ", dd.pairing)
+	if err := c.st.SavePairing(dd.pairing); err != nil {
+		log.Info.Println("save pairing failed: ", err)
+	}
+}
 
-	devUnpairedCh := dd.OnUnpaired()
-	go func() {
-		for range devUnpairedCh {
-			c.st.DeletePairing(dd.pairing.Id)
-			dd.pairing = Pairing{}
-			dd.paired = false
-			dd.verified = false
+// onUnpaired is called by device after pairing was removed.
+func (c *Controller) onUnpaired(dd *Device) {
+	if err := c.st.DeletePairing(dd.pairing.Id); err != nil {
+		log.Info.Println("delete pairing failed: ", err)
+	}
+	dd.pairing = Pairing{}
+	dd.paired = false
 
-			c.mu.Lock()
-			dd.close(errors.New("device unpaired"))
-			// if not paired and not discovered,
-			// then it should not present anymore
-			if !dd.IsDiscovered() {
-				delete(c.devices, dd.Name)
-				dd.offAllTopics()
-			}
-			c.mu.Unlock()
-		}
-	}()
-	devLostCh := dd.OnLost()
-	go func() {
-		for range devLostCh {
-			if !dd.IsPaired() {
-				// if lost and not paired,
-				// then it should not present anymore
-				c.mu.Lock()
-				delete(c.devices, dd.Name)
-				c.mu.Unlock()
-				dd.offAllTopics()
-			}
-		}
-	}()
+	dd.close(errors.New("device unpaired"))
+
+	// if not paired and not discovered,
+	// then it should not present anymore
+	if !dd.IsDiscovered() {
+		c.mu.Lock()
+		delete(c.devices, dd.Name)
+		c.mu.Unlock()
+	}
+}
+
+// onLost is called when device is no longer advertised via mdns.
+func (c *Controller) onLost(dd *Device) {
+	// if lost and not paired,
+	// then it should not present anymore
+	if !dd.IsPaired() {
+		c.mu.Lock()
+		delete(c.devices, dd.Name)
+		c.mu.Unlock()
+	}
 }
 
 func (c *Controller) getDevice(id string) *Device {
@@ -133,10 +131,10 @@ func (c *Controller) StartDiscoveryWithContext(ctx context.Context) (<-chan *Dev
 		dd := c.getDevice(e.Name)
 		if dd == nil {
 			// not exist - init one
-			dd = newDevice(&e, name, c.name, c.localLTKP, c.localLTSK)
+			dd = newDevice(&e, name, c, c.name, c.localLTKP, c.localLTSK)
 			c.putDevice(dd)
 		}
-		c.devices[name].mergeDnssdEntry(e)
+		dd.mergeDnssdEntry(e)
 
 		dd.discovered = true
 		discoverCh <- dd
@@ -150,8 +148,8 @@ func (c *Controller) StartDiscoveryWithContext(ctx context.Context) (<-chan *Dev
 		if dd != nil {
 			dd.discovered = false
 			dd.setDnssdEntry(nil)
-			dd.emit("lost")
 			dd.close(errors.New("device lost from mdns"))
+			c.onLost(dd)
 			lostCh <- dd
 		}
 	}
@@ -163,13 +161,13 @@ func (c *Controller) StartDiscoveryWithContext(ctx context.Context) (<-chan *Dev
 		}()
 		for {
 			newCtx, cancel := context.WithCancel(ctx)
-			defer cancel()
+			c.mu.Lock()
 			c.cancelDiscovery = cancel
-			if err := dnssd.LookupType(newCtx, "_hap._tcp.local.", addFn, rmvFn); err != nil {
-				if errors.Is(err, context.Canceled) {
-					return
-				}
-				continue
+			c.mu.Unlock()
+			err := dnssd.LookupType(newCtx, "_hap._tcp.local.", addFn, rmvFn)
+			cancel()
+			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+				return
 			}
 		}
 	}()
@@ -181,8 +179,11 @@ func (c *Controller) StartDiscovery() (<-chan *Device, <-chan *Device) {
 }
 
 func (c *Controller) StopDiscovery() {
-	if c.cancelDiscovery != nil {
-		c.cancelDiscovery()
+	c.mu.Lock()
+	cancel := c.cancelDiscovery
+	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
 }
 
@@ -222,7 +223,7 @@ func (c *Controller) GetVerifiedDevices() []*Device {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, d := range c.devices {
-		if d.verified {
+		if d.IsVerified() {
 			result = append(result, d)
 		}
 	}
@@ -235,7 +236,7 @@ func (c *Controller) LoadPairings() error {
 	pp := c.st.Pairings()
 	for _, p := range pp {
 		name := p.Name
-		dd := newDevice(nil, name, c.name, c.localLTKP, c.localLTSK)
+		dd := newDevice(nil, name, c, c.name, c.localLTKP, c.localLTSK)
 		dd.pairing = p
 		dd.paired = true
 

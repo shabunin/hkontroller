@@ -14,17 +14,15 @@ import (
 	"time"
 
 	"github.com/hkontrol/dnssd"
-	"github.com/olebedev/emitter"
 )
 
 const dialTimeout = 5 * time.Second
 const reqTimeout = 15 * time.Second
-const emitTimeout = 30 * time.Second
 
 type Device struct {
-	ee emitter.Emitter
-
 	Name string
+
+	ctrl *Controller
 
 	dnssdBrowseEntry *dnssd.BrowseEntry
 
@@ -35,25 +33,29 @@ type Device struct {
 	pairing Pairing
 
 	discovered bool // discovered mdns?
+	paired     bool // completed /pair-setup?
 
-	paired   bool // completed /pair-setup?
-	verified bool // is connection established after /pair-verify?
-
+	// mu guards connection state below
+	mu          sync.Mutex
+	verified    bool // is connection established after /pair-verify?
 	closeReason error
+	cc          *conn
+	ss          *session
+	httpc       *http.Client // http client with encryption support
+	accs        []*Accessory
 
-	cc    *conn
-	ss    *session
-	httpc *http.Client // http client with encryption support
-	accs  []*Accessory
+	subscribeMu sync.Mutex // serializes subscribe/unsubscribe requests
+	subsMu      sync.Mutex // guards subs, never held during requests
+	subs        []*eventSub
 }
 
 type roundTripper struct {
-	d  *Device
+	cc *conn
 	mu sync.Mutex
 }
 
-func newRoundTripper(d *Device) *roundTripper {
-	return &roundTripper{d: d, mu: sync.Mutex{}}
+func newRoundTripper(cc *conn) *roundTripper {
+	return &roundTripper{cc: cc}
 }
 
 // RoundTrip implementation to be able to use with http.Client
@@ -62,41 +64,32 @@ func (r *roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	//fmt.Println("===== roundTrip =====")
-	//dump, err := httputil.DumpRequest(req, false)
-	//if err == nil {
-	//	fmt.Println(string(dump))
-	//}
+	// if background loop is running, response comes from it
+	stopped := r.cc.loopStopped()
+	var response chan responseResult
+	if stopped != nil {
+		response = make(chan responseResult, 1)
+		r.cc.expectResponse(response)
+		defer r.cc.expectResponse(nil)
+	}
 
-	// make response channel
-	r.d.cc.response = make(chan *http.Response)
-	defer close(r.d.cc.response)
-	r.d.cc.resError = make(chan error)
-	defer close(r.d.cc.resError)
-	r.d.cc.wantResponse = true
-	defer func() { r.d.cc.wantResponse = false }()
-
-	err := req.Write(r.d.cc)
+	err := req.Write(r.cc)
 	if err != nil {
 		return nil, err
 	}
 
-	if r.d.cc.inBackground {
-		// select err or response
+	if stopped != nil {
 		select {
-		case res := <-r.d.cc.response:
-			//fmt.Println("case <- d.cc.response")
-			return res, err
-		case err := <-r.d.cc.resError:
-			//fmt.Println("case <- d.cc.resError")
-			return nil, err
+		case rr := <-response:
+			return rr.res, rr.err
+		case <-stopped:
+			return nil, errors.New("connection closed")
 		case <-req.Context().Done():
-			//fmt.Println("case <- req.Context().Done()")
 			return nil, req.Context().Err()
 		}
 	}
 
-	rd := bufio.NewReader(r.d.cc)
+	rd := bufio.NewReader(r.cc)
 	res, err := http.ReadResponse(rd, req)
 	if err != nil {
 		return nil, err
@@ -105,16 +98,16 @@ func (r *roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	return res, nil
 }
 
-func newDevice(dnssdEntry *dnssd.BrowseEntry, name string,
+func newDevice(dnssdEntry *dnssd.BrowseEntry, name string, ctrl *Controller,
 	controllerId string, controllerLTPK []byte, controllerLTSK []byte) *Device {
 
 	d := &Device{
 		dnssdBrowseEntry: dnssdEntry,
 		Name:             name,
+		ctrl:             ctrl,
 		controllerId:     controllerId,
 		controllerLTPK:   controllerLTPK,
 		controllerLTSK:   controllerLTSK,
-		ee:               emitter.Emitter{},
 	}
 
 	if dnssdEntry != nil {
@@ -148,112 +141,88 @@ func (d *Device) GetDnssdEntry() dnssd.BrowseEntry {
 	return dnssd.BrowseEntry{}
 }
 
-func (d *Device) doRequest(req *http.Request) (*http.Response, error) {
-	if d.httpc == nil || d.cc.closed {
+func (d *Device) conn() *conn {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.cc
+}
+
+func (d *Device) isConnected() bool {
+	cc := d.conn()
+	return cc != nil && !cc.isClosed()
+}
+
+func (d *Device) client() (*http.Client, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.httpc == nil || d.cc == nil || d.cc.isClosed() {
 		return nil, errors.New("no http client available")
 	}
-	return d.httpc.Do(req)
+	return d.httpc, nil
+}
+
+func (d *Device) doRequest(req *http.Request) (*http.Response, error) {
+	httpc, err := d.client()
+	if err != nil {
+		return nil, err
+	}
+	return httpc.Do(req)
 }
 func (d *Device) doPost(url string, contentType string, body io.Reader) (*http.Response, error) {
-	if d.httpc == nil || d.cc.closed {
-		return nil, errors.New("no http client available")
+	httpc, err := d.client()
+	if err != nil {
+		return nil, err
 	}
-	return d.httpc.Post(url, contentType, body)
+	return httpc.Post(url, contentType, body)
 }
 func (d *Device) doGet(url string) (*http.Response, error) {
-	if d.httpc == nil || d.cc.closed {
-		return nil, errors.New("no http client available")
+	httpc, err := d.client()
+	if err != nil {
+		return nil, err
 	}
-	return d.httpc.Get(url)
+	return httpc.Get(url)
 }
 
-func (d *Device) emit(topic string, args ...interface{}) {
-	defer func() {
-		// sometimes done channel is closed before emitTimeout
-		recover()
-	}()
-	done := d.ee.Emit(topic, args...)
-	select {
-	case <-done:
-		// so the sending is done
-	case <-time.After(emitTimeout):
-		// time is out, let's discard emitting
-		close(done)
-	}
+func (d *Device) close(reason error) {
+	d.closeConn(d.conn(), reason)
 }
 
-func (d *Device) offAllTopics() {
-	for _, t := range d.ee.Topics() {
-		d.ee.Off(t)
+// closeConn closes cc if it is still device's connection and
+// waits until its background read is stopped.
+// Event subscriptions are closed as well.
+func (d *Device) closeConn(cc *conn, reason error) {
+	d.mu.Lock()
+	if d.cc != cc {
+		// already closed or replaced by newer connection
+		d.mu.Unlock()
+		return
 	}
-}
-func (d *Device) OnDiscovered() <-chan emitter.Event {
-	return d.ee.On("discover")
-}
-func (d *Device) OffDiscovered(ch <-chan emitter.Event) {
-	d.ee.Off("discovered", ch)
-}
-func (d *Device) OnLost() <-chan emitter.Event {
-	return d.ee.On("lost")
-}
-func (d *Device) OffLost(ch <-chan emitter.Event) {
-	d.ee.Off("lost", ch)
-}
-func (d *Device) OnClose() <-chan emitter.Event {
-	return d.ee.On("close")
-}
-func (d *Device) OffClose(ch <-chan emitter.Event) {
-	d.ee.Off("close", ch)
-}
-func (d *Device) OnPaired() <-chan emitter.Event {
-	return d.ee.On("paired")
-}
-func (d *Device) OffPaired(ch <-chan emitter.Event) {
-	d.ee.Off("paired", ch)
-}
-func (d *Device) OnVerified() <-chan emitter.Event {
-	return d.ee.On("verified")
-}
-func (d *Device) OffVerified(ch <-chan emitter.Event) {
-	d.ee.Off("verified", ch)
-}
-func (d *Device) OnUnpaired() <-chan emitter.Event {
-	return d.ee.On("unpaired")
-}
-func (d *Device) OffUnpaired(ch <-chan emitter.Event) {
-	d.ee.Off("unpaired", ch)
-}
-
-func (d *Device) close(reason error) error {
-	log.Debug.Println("device <%s> close call with reason: %v\n", d.Name, reason)
+	log.Debug.Printf("device <%s> close call with reason: %v\n", d.Name, reason)
 	d.closeReason = reason
-	var err error
-	if d.cc != nil {
-		d.cc.close()
-		if d.verified {
-			for range d.cc.backgroundStop {
-			}
-		}
-		d.cc = nil
-	}
-	d.verified = false
+	d.cc = nil
 	d.httpc = nil
-
+	d.verified = false
 	d.accs = nil
+	d.mu.Unlock()
 
-	d.ee.Off("event*") // close all subscriptions to char events
+	if cc != nil {
+		cc.close()
+		if stopped := cc.loopStopped(); stopped != nil {
+			<-stopped
+		}
+	}
 
-	d.emit("close")
-	return err
+	d.closeSubscriptions()
 }
 
 func (d *Device) Close() error {
-	return d.close(errors.New("manual close "))
+	d.close(errors.New("manual close "))
+	return nil
 }
 
 func (d *Device) connect() error {
 
-	if d.cc != nil {
+	if d.conn() != nil {
 		d.close(errors.New("close on reconnect"))
 	}
 
@@ -268,22 +237,39 @@ func (d *Device) connect() error {
 
 	// connection, http client
 	cc := newConn(dial)
+	cc.SetEventCallback(d.onEvent)
+
+	d.mu.Lock()
 	d.cc = cc
 	d.httpc = &http.Client{
-		Transport: newRoundTripper(d),
+		Transport: newRoundTripper(cc),
 	}
-	d.cc.SetEventCallback(d.onEvent)
-
 	d.closeReason = nil
+	d.mu.Unlock()
 
 	return nil
 }
 
-func (d *Device) startBackgroundRead() {
+// setVerified switches connection to encrypted session and starts background read.
+func (d *Device) setVerified(ss *session) {
+	d.mu.Lock()
+	cc := d.cc
+	d.ss = ss
+	d.verified = true
+	d.mu.Unlock()
+
+	cc.UpgradeEnc(ss)
+	d.startBackgroundRead(cc)
+}
+
+// startBackgroundRead reads responses and events from cc
+// until it is closed, then closes device connection.
+func (d *Device) startBackgroundRead(cc *conn) {
+	stopped := cc.startLoop()
 	go func() {
-		d.cc.loop()
+		<-stopped
 		log.Debug.Println("background read: loop stopped")
-		d.close(errors.New("stop background read"))
+		d.closeConn(cc, errors.New("stop background read"))
 	}()
 }
 
@@ -304,17 +290,23 @@ func (d *Device) GetPairingInfo() Pairing {
 
 // IsVerified returns true if /pair-verify step was completed by this controller.
 func (d *Device) IsVerified() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	return d.verified
 }
 
 // CloseReason returns last close reason if connection is closed
 func (d *Device) CloseReason() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	return d.closeReason
 }
 
 // Accessories return list of previously discovered accessories.
 // GetAccessories should be called prior to this call.
 func (d *Device) Accessories() []*Accessory {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	return d.accs
 }
 
@@ -322,7 +314,7 @@ func (d *Device) Accessories() []*Accessory {
 // result that can be retrieved with Accessories() method.
 func (d *Device) GetAccessories() error {
 
-	if !d.verified || d.httpc == nil {
+	if !d.IsVerified() {
 		return errors.New("paired device not verified or not connected")
 	}
 
@@ -335,7 +327,7 @@ func (d *Device) GetAccessories() error {
 	}
 	res, err := d.doRequest(req)
 	if err != nil {
-		return nil
+		return err
 	}
 
 	all, err := io.ReadAll(res.Body)
@@ -359,7 +351,9 @@ func (d *Device) GetAccessories() error {
 		}
 	}
 
+	d.mu.Lock()
 	d.accs = accs.Accs
+	d.mu.Unlock()
 
 	return nil
 }
@@ -398,7 +392,7 @@ func (d *Device) GetCharacteristic(aid uint64, cid uint64) (CharacteristicDescri
 	}
 
 	for _, c := range chrs.Characteristics {
-		if c.Aid == aid || c.Iid == cid {
+		if c.Aid == aid && c.Iid == cid {
 			return c, nil
 		}
 	}
@@ -442,302 +436,6 @@ func (d *Device) PutCharacteristic(aid uint64, cid uint64, val interface{}) erro
 	// 		 case of error:
 	//        {"characteristics":[{"aid":1,"iid":12,"status":-70402}]}
 	// fmt.Println(string(all))
-
-	return nil
-}
-
-func (d *Device) onEvent(res *http.Response) {
-	all, err := io.ReadAll(res.Body)
-	if err != nil {
-		return
-	}
-
-	type responsePayload struct {
-		Characteristics []CharacteristicDescription `json:"characteristics"`
-	}
-
-	var chrs responsePayload
-	err = json.Unmarshal(all, &chrs)
-	if err != nil {
-		return
-	}
-	for _, ch := range chrs.Characteristics {
-		aid := ch.Aid
-		iid := ch.Iid
-		val := ch.Value
-
-		// update values, so it will be available without extra GetAccessories request
-		for _, aa := range d.Accessories() {
-			if aa.Id != aid {
-				continue
-			}
-			for _, ss := range aa.Ss {
-				for _, cc := range ss.Cs {
-					if cc.Iid == iid {
-						cc.Value = val
-					}
-				}
-			}
-		}
-
-		topic := fmt.Sprintf("event %d %d", aid, iid)
-		d.emit(topic, aid, iid, val)
-	}
-}
-
-func (d *Device) getEventPutPayloadForAccessory(aid int, subscribe bool) []CharacteristicPut {
-	var cs []CharacteristicPut
-	for _, aa := range d.Accessories() {
-		if int(aa.Id) != aid && aid > -1 { // if aid < 0 we get list for all accs
-			continue
-		}
-		for _, ss := range aa.Ss {
-			for _, cc := range ss.Cs {
-				for _, pp := range cc.Permissions {
-					if pp == "ev" { // supported
-						ev := subscribe
-						cs = append(cs, CharacteristicPut{Aid: aa.Id, Iid: cc.Iid, Events: &ev})
-					}
-				}
-			}
-		}
-	}
-	return cs
-}
-
-func (d *Device) SubscribeToEvents(aid uint64, iid uint64) (<-chan emitter.Event, error) {
-	topic := fmt.Sprintf("event %d %d", aid, iid)
-	super := fmt.Sprintf("event %d *", aid)
-	mega := fmt.Sprintf("event * *")
-
-	for _, tt := range d.ee.Topics() {
-		if tt == topic || tt == super || tt == mega {
-			// already subscribed
-			// support multiple listeners
-			return d.ee.On(topic), nil
-		}
-	}
-
-	type putPayload struct {
-		Cs []CharacteristicPut `json:"characteristics"`
-	}
-
-	ev := true
-	c := putPayload{Cs: []CharacteristicPut{{Aid: aid, Iid: iid, Events: &ev}}}
-	b, err := json.Marshal(c)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("PUT", "/characteristics", bytes.NewReader(b))
-	if err != nil {
-		return nil, err
-	}
-
-	res, err := d.doRequest(req)
-	if err != nil {
-		return nil, err
-	}
-
-	if res.StatusCode != http.StatusNoContent {
-		return nil, errors.New("not 204")
-	}
-
-	return d.ee.On(topic), nil
-}
-
-func (d *Device) SubscribeToAccessoryEvents(aid uint64) (<-chan emitter.Event, error) {
-
-	topic := fmt.Sprintf("event %d *", aid)
-	super := fmt.Sprintf("event * *")
-
-	for _, tt := range d.ee.Topics() {
-		if tt == topic || tt == super {
-			// already subscribed
-			// support multiple listeners
-			return d.ee.On(topic), nil
-		}
-	}
-
-	type putPayload struct {
-		Cs []CharacteristicPut `json:"characteristics"`
-	}
-	pl := putPayload{Cs: d.getEventPutPayloadForAccessory(int(aid), true)}
-
-	b, err := json.Marshal(pl)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("PUT", "/characteristics", bytes.NewReader(b))
-	if err != nil {
-		return nil, err
-	}
-
-	res, err := d.doRequest(req)
-	if err != nil {
-		return nil, err
-	}
-
-	if res.StatusCode != http.StatusNoContent {
-		return nil, errors.New("not 204")
-	}
-
-	return d.ee.On(topic), nil
-}
-
-func (d *Device) SubscribeToAllEvents() (<-chan emitter.Event, error) {
-
-	topic := fmt.Sprintf("event * *")
-
-	for _, tt := range d.ee.Topics() {
-		if tt == topic {
-			// already subscribed
-			// support multiple listeners
-			return d.ee.On(topic), nil
-		}
-	}
-
-	type putPayload struct {
-		Cs []CharacteristicPut `json:"characteristics"`
-	}
-
-	pl := putPayload{Cs: d.getEventPutPayloadForAccessory(-1, true)}
-
-	b, err := json.Marshal(pl)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("PUT", "/characteristics", bytes.NewReader(b))
-	if err != nil {
-		return nil, err
-	}
-
-	res, err := d.doRequest(req)
-	if err != nil {
-		return nil, err
-	}
-
-	if res.StatusCode != http.StatusNoContent {
-		return nil, errors.New("not 204")
-	}
-
-	return d.ee.On(topic), nil
-}
-
-func (d *Device) UnsubscribeFromAllEvents(channels ...<-chan emitter.Event) error {
-
-	topic := fmt.Sprintf("event * *")
-
-	if len(channels) != 0 && len(channels) < len(d.ee.Listeners(topic)) {
-		// somebody else subscribed
-		d.ee.Off(topic, channels...)
-		return nil
-	}
-
-	type putPayload struct {
-		Cs []CharacteristicPut `json:"characteristics"`
-	}
-
-	pl := putPayload{Cs: d.getEventPutPayloadForAccessory(-1, false)}
-
-	b, err := json.Marshal(pl)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequest("PUT", "/characteristics", bytes.NewReader(b))
-	if err != nil {
-		return err
-	}
-
-	_, err = d.doRequest(req)
-	if err != nil {
-		return err
-	}
-
-	// close all related channels
-	for _, pp := range pl.Cs {
-		topic := fmt.Sprintf("event %d %d", pp.Aid, pp.Iid)
-		d.ee.Off(topic)
-	}
-
-	return nil
-}
-
-func (d *Device) UnsubscribeFromAccessoryEvents(aid uint64, channels ...<-chan emitter.Event) error {
-
-	topic := fmt.Sprintf("event %d *", aid)
-
-	if len(channels) != 0 && len(channels) < len(d.ee.Listeners(topic)) {
-		// somebody else subscribed
-		d.ee.Off(topic, channels...)
-		return nil
-	}
-
-	type putPayload struct {
-		Cs []CharacteristicPut `json:"characteristics"`
-	}
-
-	pl := putPayload{Cs: d.getEventPutPayloadForAccessory(-1, false)}
-
-	b, err := json.Marshal(pl)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequest("PUT", "/characteristics", bytes.NewReader(b))
-	if err != nil {
-		return err
-	}
-
-	_, err = d.doRequest(req)
-	if err != nil {
-		return err
-	}
-
-	// close all related channels
-	for _, pp := range pl.Cs {
-		topic := fmt.Sprintf("event %d %d", pp.Aid, pp.Iid)
-		d.ee.Off(topic)
-	}
-
-	return nil
-}
-
-func (d *Device) UnsubscribeFromEvents(aid uint64, iid uint64, channels ...<-chan emitter.Event) error {
-
-	topic := fmt.Sprintf("event %d %d", aid, iid)
-
-	if len(channels) != 0 && len(channels) < len(d.ee.Listeners(topic)) {
-		// somebody else subscribed
-		d.ee.Off(topic, channels...)
-		return nil
-	}
-
-	type putPayload struct {
-		Cs []CharacteristicPut `json:"characteristics"`
-	}
-
-	ev := false
-	c := putPayload{Cs: []CharacteristicPut{{Aid: aid, Iid: iid, Events: &ev}}}
-	b, err := json.Marshal(c)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequest("PUT", "/characteristics", bytes.NewReader(b))
-	if err != nil {
-		return err
-	}
-
-	_, err = d.doRequest(req)
-	if err != nil {
-		return err
-	}
-
-	d.ee.Off(topic)
 
 	return nil
 }

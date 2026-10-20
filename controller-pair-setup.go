@@ -270,7 +270,7 @@ func (d *Device) pairSetupM5(clientSession *pairSetupClientSession) error {
 
 func (d *Device) PairSetup(pin string) error {
 
-	if d.cc == nil || d.cc.closed {
+	if !d.isConnected() {
 		err := d.connect()
 		if err != nil {
 			return err
@@ -290,7 +290,11 @@ func (d *Device) PairSetup(pin string) error {
 		return err
 	}
 	d.paired = true
+	d.mu.Lock()
 	d.verified = false
-	d.emit("paired")
+	d.mu.Unlock()
+	if d.ctrl != nil {
+		d.ctrl.onPaired(d)
+	}
 	return nil
 }
