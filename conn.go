@@ -12,20 +12,43 @@ import (
 	"net"
 	"net/http"
 	"net/textproto"
-	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
-// dialServiceInstance lookup dnssd service and make tcp connection
-func dialServiceInstance(ctx context.Context, e *dnssd.BrowseEntry, dialTimeout time.Duration) (net.Conn, error) {
+// dialAddrs returns tcp addresses of all entries, ip4 first.
+// IPv6 addresses get zone of interface they were discovered on.
+func dialAddrs(entries []dnssd.BrowseEntry) []string {
+	var addrs4, addrs6 []string
+	seen := make(map[string]bool)
+	for _, e := range entries {
+		for _, ip := range e.IPs {
+			var tcpAddr string
+			if ip.To4() == nil {
+				// ipv6 tcpAddr in square brackets
+				// [fe80::...%wlp2s0]:51510
+				tcpAddr = fmt.Sprintf("[%s%%%s]:%d", ip.String(), e.IfaceName, e.Port)
+			} else {
+				tcpAddr = fmt.Sprintf("%s:%d", ip.String(), e.Port)
+			}
+			if seen[tcpAddr] {
+				continue
+			}
+			seen[tcpAddr] = true
+			if ip.To4() == nil {
+				addrs6 = append(addrs6, tcpAddr)
+			} else {
+				addrs4 = append(addrs4, tcpAddr)
+			}
+		}
+	}
+	return append(addrs4, addrs6...)
+}
 
-	IPs := e.IPs
-	sort.Slice(IPs, func(i, j int) bool {
-		return IPs[i].To4() != nil // ip4 first
-	})
+// dialServiceInstance probes every address of dnssd entries and returns first established tcp connection
+func dialServiceInstance(ctx context.Context, entries []dnssd.BrowseEntry, dialTimeout time.Duration) (net.Conn, error) {
 
 	var firstEstablishedConn net.Conn
 	mu := sync.Mutex{}
@@ -36,16 +59,7 @@ func dialServiceInstance(ctx context.Context, e *dnssd.BrowseEntry, dialTimeout 
 
 	// probe every ip tcpAddr
 	wg := sync.WaitGroup{}
-	for _, ip := range IPs {
-		var tcpAddr string
-		if ip.To4() == nil {
-			// ipv6 tcpAddr in square brackets
-			// [fe80::...%wlp2s0]:51510
-			tcpAddr = fmt.Sprintf("[%s%%%s]:%d", ip.String(), e.IfaceName, e.Port)
-		} else {
-			tcpAddr = fmt.Sprintf("%s:%d", ip.String(), e.Port)
-		}
-
+	for _, tcpAddr := range dialAddrs(entries) {
 		log.Debug.Println("dialing: ", tcpAddr)
 
 		wg.Add(1)
@@ -64,6 +78,8 @@ func dialServiceInstance(ctx context.Context, e *dnssd.BrowseEntry, dialTimeout 
 			if firstEstablishedConn == nil {
 				firstEstablishedConn = tcpConn
 				cancel() // cancel all other attempts
+			} else {
+				tcpConn.Close() // another attempt was faster
 			}
 		}(tcpAddr)
 	}

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"github.com/hkontrol/hkontroller/log"
 	"io"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -31,19 +32,18 @@ type Device struct {
 
 	ctrl *Controller
 
-	dnssdBrowseEntry *dnssd.BrowseEntry
-
 	controllerId   string
 	controllerLTPK []byte
 	controllerLTSK []byte
 
+	// mu guards discovery, pairing and connection state below
+	mu sync.Mutex
+
+	dnssdEntries map[string]dnssd.BrowseEntry // mdns entries by interface name
+
 	pairing Pairing
+	paired  bool // completed /pair-setup?
 
-	discovered bool // discovered mdns?
-	paired     bool // completed /pair-setup?
-
-	// mu guards connection state below
-	mu          sync.Mutex
 	verified    bool // is connection established after /pair-verify?
 	closeReason error
 	cc          *conn
@@ -105,47 +105,77 @@ func (r *roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	return res, nil
 }
 
-func newDevice(dnssdEntry *dnssd.BrowseEntry, name string, ctrl *Controller,
+func newDevice(name string, ctrl *Controller,
 	controllerId string, controllerLTPK []byte, controllerLTSK []byte) *Device {
 
-	d := &Device{
-		dnssdBrowseEntry: dnssdEntry,
-		Name:             name,
-		ctrl:             ctrl,
-		controllerId:     controllerId,
-		controllerLTPK:   controllerLTPK,
-		controllerLTSK:   controllerLTSK,
-	}
-
-	if dnssdEntry != nil {
-		d.Name = dnssdEntry.Name
-	}
-
-	return d
-}
-
-func (d *Device) setDnssdEntry(e *dnssd.BrowseEntry) {
-	d.dnssdBrowseEntry = e
-	if e != nil {
-		d.Name = e.Name
+	return &Device{
+		Name:           name,
+		ctrl:           ctrl,
+		controllerId:   controllerId,
+		controllerLTPK: controllerLTPK,
+		controllerLTSK: controllerLTSK,
+		dnssdEntries:   make(map[string]dnssd.BrowseEntry),
 	}
 }
 
-func (d *Device) mergeDnssdEntry(e dnssd.BrowseEntry) {
-	if d.dnssdBrowseEntry == nil {
-		d.dnssdBrowseEntry = &e
-		return
-	}
-	for _, ip := range e.IPs {
-		d.dnssdBrowseEntry.IPs = append(d.dnssdBrowseEntry.IPs, ip)
-	}
+func copyEntry(e dnssd.BrowseEntry) dnssd.BrowseEntry {
+	e.IPs = append([]net.IP(nil), e.IPs...)
+	return e
 }
 
+// addDnssdEntry stores entry of interface where device is advertised.
+// Returns true if device was not discovered before.
+func (d *Device) addDnssdEntry(e dnssd.BrowseEntry) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	first := len(d.dnssdEntries) == 0
+	d.dnssdEntries[e.IfaceName] = copyEntry(e)
+	return first
+}
+
+// removeDnssdEntry forgets entry of interface.
+// Returns true if device is no longer advertised on any interface.
+func (d *Device) removeDnssdEntry(e dnssd.BrowseEntry) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	old, ok := d.dnssdEntries[e.IfaceName]
+	if !ok || old.Port != e.Port {
+		// unknown or already replaced by entry with new port
+		return false
+	}
+	delete(d.dnssdEntries, e.IfaceName)
+	return len(d.dnssdEntries) == 0
+}
+
+// entries returns copy of dnssd entries for all interfaces.
+func (d *Device) entries() []dnssd.BrowseEntry {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var res []dnssd.BrowseEntry
+	for _, e := range d.dnssdEntries {
+		res = append(res, copyEntry(e))
+	}
+	return res
+}
+
+// GetDnssdEntry returns dnssd entry with IPs of all interfaces device is advertised on.
 func (d *Device) GetDnssdEntry() dnssd.BrowseEntry {
-	if d.dnssdBrowseEntry != nil {
-		return *d.dnssdBrowseEntry
+	var res dnssd.BrowseEntry
+	for i, e := range d.entries() {
+		if i == 0 {
+			res = e
+			continue
+		}
+		res.IPs = append(res.IPs, e.IPs...)
 	}
-	return dnssd.BrowseEntry{}
+	return res
+}
+
+func (d *Device) setPairing(p Pairing, paired bool) {
+	d.mu.Lock()
+	d.pairing = p
+	d.paired = paired
+	d.mu.Unlock()
 }
 
 func (d *Device) conn() *conn {
@@ -258,11 +288,12 @@ func (d *Device) connect() error {
 		d.close(errors.New("close on reconnect"))
 	}
 
-	if d.dnssdBrowseEntry == nil || !d.discovered {
+	entries := d.entries()
+	if len(entries) == 0 {
 		return errors.New("not discovered")
 	}
 
-	dial, err := dialServiceInstance(context.Background(), d.dnssdBrowseEntry, dialTimeout)
+	dial, err := dialServiceInstance(context.Background(), entries, dialTimeout)
 	if err != nil {
 		return err
 	}
@@ -307,16 +338,22 @@ func (d *Device) startBackgroundRead(cc *conn) {
 
 // IsDiscovered indicates if device is advertised via multicast dns
 func (d *Device) IsDiscovered() bool {
-	return d.discovered
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.dnssdEntries) > 0
 }
 
 // IsPaired returns true if device is paired by this controller.
 // If another client is paired with device it will return false.
 func (d *Device) IsPaired() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	return d.paired
 }
 
 func (d *Device) GetPairingInfo() Pairing {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	return d.pairing
 }
 

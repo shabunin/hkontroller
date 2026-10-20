@@ -261,9 +261,11 @@ func (d *Device) pairSetupM5(clientSession *pairSetupClientSession) error {
 		return &PairSetupError{"M6", errors.New("m6 signature is not valid")}
 	}
 
+	d.mu.Lock()
 	d.pairing.Name = d.Name
 	d.pairing.Id = accessoryId
 	d.pairing.PublicKey = accessoryLTPK
+	d.mu.Unlock()
 
 	return nil
 }
@@ -289,8 +291,8 @@ func (d *Device) PairSetup(pin string) error {
 	if err != nil {
 		return err
 	}
-	d.paired = true
 	d.mu.Lock()
+	d.paired = true
 	d.verified = false
 	d.mu.Unlock()
 	if d.ctrl != nil {

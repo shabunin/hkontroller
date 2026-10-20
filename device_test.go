@@ -79,7 +79,7 @@ func newTestDevice(t *testing.T, handle func(*http.Request, string) string) (*De
 	acc := &fakeAccessory{t: t, conn: server, handle: handle}
 	go acc.serve()
 
-	d := newDevice(nil, "test", nil, "ctrl", nil, nil)
+	d := newDevice("test", nil, "ctrl", nil, nil)
 	cc := newConn(client)
 	cc.SetEventCallback(d.onEvent)
 	d.cc = cc
@@ -349,7 +349,7 @@ func TestCloseWithoutBackgroundRead(t *testing.T) {
 	client, server := net.Pipe()
 	defer server.Close()
 
-	d := newDevice(nil, "test", nil, "ctrl", nil, nil)
+	d := newDevice("test", nil, "ctrl", nil, nil)
 	d.cc = newConn(client)
 	d.httpc = &http.Client{Transport: newRoundTripper(d.cc)}
 
@@ -396,6 +396,6 @@ func TestDoneOnClose(t *testing.T) {
 }
 
 func TestDoneWithoutConnection(t *testing.T) {
-	d := newDevice(nil, "test", nil, "ctrl", nil, nil)
+	d := newDevice("test", nil, "ctrl", nil, nil)
 	waitDone(t, d.Done())
 }

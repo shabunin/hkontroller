@@ -74,19 +74,19 @@ func (c *Controller) putDevice(dd *Device) {
 
 // onPaired is called by device after successful /pair-setup.
 func (c *Controller) onPaired(dd *Device) {
-	log.Debug.Println("save pairing: ", dd.pairing)
-	if err := c.st.SavePairing(dd.pairing); err != nil {
+	p := dd.GetPairingInfo()
+	log.Debug.Println("save pairing: ", p)
+	if err := c.st.SavePairing(p); err != nil {
 		log.Info.Println("save pairing failed: ", err)
 	}
 }
 
 // onUnpaired is called by device after pairing was removed.
 func (c *Controller) onUnpaired(dd *Device) {
-	if err := c.st.DeletePairing(dd.pairing.Id); err != nil {
+	if err := c.st.DeletePairing(dd.GetPairingInfo().Id); err != nil {
 		log.Info.Println("delete pairing failed: ", err)
 	}
-	dd.pairing = Pairing{}
-	dd.paired = false
+	dd.setPairing(Pairing{}, false)
 
 	dd.close(errors.New("device unpaired"))
 
@@ -110,6 +110,32 @@ func (c *Controller) onLost(dd *Device) {
 	}
 }
 
+// onDnssdAdd stores mdns entry. Returns device and true if device is newly discovered.
+func (c *Controller) onDnssdAdd(e dnssd.BrowseEntry) (*Device, bool) {
+	c.mu.Lock()
+	dd, ok := c.devices[e.Name]
+	if !ok {
+		// not exist - init one
+		dd = newDevice(e.Name, c, c.name, c.localLTKP, c.localLTSK)
+		c.devices[e.Name] = dd
+	}
+	c.mu.Unlock()
+
+	return dd, dd.addDnssdEntry(e)
+}
+
+// onDnssdRemove forgets mdns entry. Device is lost only when it is not
+// advertised on any interface anymore, then it returns device and true.
+func (c *Controller) onDnssdRemove(e dnssd.BrowseEntry) (*Device, bool) {
+	dd := c.getDevice(e.Name)
+	if dd == nil || !dd.removeDnssdEntry(e) {
+		return dd, false
+	}
+	dd.close(errors.New("device lost from mdns"))
+	c.onLost(dd)
+	return dd, true
+}
+
 func (c *Controller) getDevice(id string) *Device {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -125,31 +151,16 @@ func (c *Controller) StartDiscoveryWithContext(ctx context.Context) (<-chan *Dev
 	discoverCh := make(chan *Device)
 	lostCh := make(chan *Device)
 
+	// entries come per network interface,
+	// so device is sent to channels only when its state changes
 	addFn := func(e dnssd.BrowseEntry) {
-		name := e.Name
-
-		dd := c.getDevice(e.Name)
-		if dd == nil {
-			// not exist - init one
-			dd = newDevice(&e, name, c, c.name, c.localLTKP, c.localLTSK)
-			c.putDevice(dd)
+		if dd, discovered := c.onDnssdAdd(e); discovered {
+			discoverCh <- dd
 		}
-		dd.mergeDnssdEntry(e)
-
-		dd.discovered = true
-		discoverCh <- dd
 	}
 
 	rmvFn := func(e dnssd.BrowseEntry) {
-		//id := strings.Join([]string{e.Name, e.Type, e.Domain}, ".")
-		id := e.Name
-		dd := c.getDevice(id)
-
-		if dd != nil {
-			dd.discovered = false
-			dd.setDnssdEntry(nil)
-			dd.close(errors.New("device lost from mdns"))
-			c.onLost(dd)
+		if dd, lost := c.onDnssdRemove(e); lost {
 			lostCh <- dd
 		}
 	}
@@ -208,7 +219,7 @@ func (c *Controller) GetPairedDevices() []*Device {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, d := range c.devices {
-		if d.paired {
+		if d.IsPaired() {
 			result = append(result, d)
 		}
 	}
@@ -235,10 +246,8 @@ func (c *Controller) LoadPairings() error {
 
 	pp := c.st.Pairings()
 	for _, p := range pp {
-		name := p.Name
-		dd := newDevice(nil, name, c, c.name, c.localLTKP, c.localLTSK)
-		dd.pairing = p
-		dd.paired = true
+		dd := newDevice(p.Name, c, c.name, c.localLTKP, c.localLTSK)
+		dd.setPairing(p, true)
 
 		c.putDevice(dd)
 	}

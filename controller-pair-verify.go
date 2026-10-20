@@ -28,7 +28,7 @@ type pairVerifyM3EncPayload struct {
 
 // PairVerify
 func (d *Device) PairVerify() error {
-	if !d.paired {
+	if !d.IsPaired() {
 		return errors.New("pair device before verifying")
 	}
 	if d.IsVerified() {
@@ -122,7 +122,7 @@ func (d *Device) PairVerify() error {
 	material = append(material, m2dec.Identifier...)
 	material = append(material, localPublic[:]...)
 
-	ltpk := d.pairing.PublicKey
+	ltpk := d.GetPairingInfo().PublicKey
 
 	sigValid := ed25519.ValidateSignature(ltpk, material, m2dec.Signature)
 	if !sigValid {
