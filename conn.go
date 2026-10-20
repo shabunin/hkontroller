@@ -130,6 +130,8 @@ type conn struct {
 
 	onEvent func(*http.Response) // EVENT callback, when characteristic value updated
 
+	done chan struct{} // closed by device when connection is closed
+
 	// pending receives response for the request in flight, nil if nobody waits.
 	// It is buffered, so loop never blocks even if requester is gone.
 	pmu     sync.Mutex
@@ -142,7 +144,7 @@ type responseResult struct {
 }
 
 func newConn(c net.Conn) *conn {
-	return &conn{Conn: c}
+	return &conn{Conn: c, done: make(chan struct{})}
 }
 
 func (c *conn) close() {

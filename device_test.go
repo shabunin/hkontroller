@@ -355,3 +355,47 @@ func TestCloseWithoutBackgroundRead(t *testing.T) {
 
 	closeWithin(t, d, time.Second)
 }
+
+func waitDone(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("done channel is not closed")
+	}
+}
+
+func TestDoneOnConnectionLoss(t *testing.T) {
+	d, acc := newTestDevice(t, noContent)
+
+	done := d.Done()
+	select {
+	case <-done:
+		t.Fatal("done is closed while connected")
+	default:
+	}
+
+	acc.conn.Close() // accessory went offline
+	waitDone(t, done)
+
+	if d.IsVerified() || d.CloseReason() == nil {
+		t.Fatal("device state is not reset before done")
+	}
+	// no connection anymore
+	waitDone(t, d.Done())
+}
+
+func TestDoneOnClose(t *testing.T) {
+	d, _ := newTestDevice(t, noContent)
+	done := d.Done()
+	closeWithin(t, d, time.Second)
+	waitDone(t, done)
+	if d.CloseReason() == nil {
+		t.Fatal("close reason is not set")
+	}
+}
+
+func TestDoneWithoutConnection(t *testing.T) {
+	d := newDevice(nil, "test", nil, "ctrl", nil, nil)
+	waitDone(t, d.Done())
+}

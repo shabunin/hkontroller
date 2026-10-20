@@ -16,6 +16,13 @@ import (
 	"github.com/hkontrol/dnssd"
 )
 
+// closedChan is returned by Done when there is no connection.
+var closedChan = func() chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
+}()
+
 const dialTimeout = 5 * time.Second
 const reqTimeout = 15 * time.Second
 
@@ -213,6 +220,31 @@ func (d *Device) closeConn(cc *conn, reason error) {
 	}
 
 	d.closeSubscriptions()
+
+	if cc != nil {
+		close(cc.done)
+	}
+}
+
+// Done returns channel that is closed when current connection is closed,
+// e.g. accessory went offline, device was lost or unpaired, or Close was called.
+// CloseReason tells why. If device is not connected, returned channel is already closed.
+//
+// Typical reconnect loop:
+//
+//	for d.IsPaired() {
+//		if err := d.PairVerify(); err != nil {
+//			time.Sleep(retryTimeout)
+//			continue
+//		}
+//		<-d.Done()
+//	}
+func (d *Device) Done() <-chan struct{} {
+	cc := d.conn()
+	if cc == nil {
+		return closedChan
+	}
+	return cc.done
 }
 
 func (d *Device) Close() error {

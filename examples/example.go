@@ -7,7 +7,10 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
+
+const reconnectTimeout = 3 * time.Second
 
 func main() {
 	c, err := hkontroller.NewController(
@@ -30,13 +33,24 @@ func main() {
 
 	discoverCh, lostCh := c.StartDiscovery()
 
-	verify := func(d *hkontroller.Device) {
+	var verify func(d *hkontroller.Device)
+	verify = func(d *hkontroller.Device) {
 		err := d.PairVerify()
 		if err != nil {
 			writeln("pair-verify err: ", err)
 			return
 		}
 		writeln("should be connected now")
+
+		// reconnect when connection is broken
+		go func() {
+			<-d.Done()
+			writeln("connection closed: ", d.CloseReason())
+			time.Sleep(reconnectTimeout)
+			if d.IsPaired() && d.IsDiscovered() && !d.IsVerified() {
+				verify(d)
+			}
+		}()
 	}
 
 	go func() {
