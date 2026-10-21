@@ -910,3 +910,89 @@ func TestPairSetupErrorWithSalt(t *testing.T) {
 		t.Fatalf("expected unavailable error, got %v", err)
 	}
 }
+
+func TestReloadEnablesEventsForNewAccessory(t *testing.T) {
+	var mu sync.Mutex
+	body := `{"accessories":[{"aid":1,"services":[{"iid":1,"type":"49","characteristics":[
+		{"iid":10,"type":"25","perms":["pr","pw","ev"]}]}]}]}`
+	d, acc := newTestDevice(t, func(req *http.Request, _ string) string {
+		if req.Method == "PUT" {
+			return noContent(nil, "")
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		return jsonResponse(body)
+	})
+	if err := d.GetAccessories(); err != nil {
+		t.Fatal(err)
+	}
+	ch, err := d.SubscribeToAllEvents()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// loaded by user, not changed by accessory
+	changed := d.AccessoriesChanged()
+	if err := d.GetAccessories(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-changed:
+		t.Fatal("AccessoriesChanged fired without configuration change")
+	default:
+	}
+	if puts := acc.putBodies(); len(puts) != 1 {
+		t.Fatalf("events enabled again for known characteristics: %v", puts)
+	}
+
+	// accessory added on bridge, accessory reports new c#
+	mu.Lock()
+	body = `{"accessories":[{"aid":1,"services":[{"iid":1,"type":"49","characteristics":[
+		{"iid":10,"type":"25","perms":["pr","pw","ev"]}]}]},
+		{"aid":2,"services":[{"iid":1,"type":"49","characteristics":[
+		{"iid":10,"type":"25","perms":["pr","pw","ev"]},{"iid":11,"type":"23","perms":["pr"]}]}]}]}`
+	mu.Unlock()
+	d.refreshAccessories()
+	select {
+	case <-changed:
+	case <-time.After(time.Second):
+		t.Fatal("AccessoriesChanged is not closed")
+	}
+
+	puts := acc.putBodies()
+	if len(puts) != 2 || puts[1] != `{"characteristics":[{"aid":2,"iid":10,"ev":true}]}` {
+		t.Fatalf("expected events enabled for new characteristic only: %v", puts)
+	}
+	acc.write(eventMessage(2, 10, 1))
+	if ev := receive(t, ch); ev.Aid != 2 || ev.Iid != 10 {
+		t.Fatalf("unexpected event %+v", ev)
+	}
+	if d.AccessoriesChanged() == changed {
+		t.Fatal("new channel expected for next change")
+	}
+}
+
+func TestPairRemoveResponse(t *testing.T) {
+	for _, tc := range []struct {
+		tlv  []byte
+		code byte // expected tlv error code, 0 for success, 0xff for other error
+	}{
+		{[]byte{6, 1, M2}, 0},
+		{[]byte{6, 1, M2, 7, 1, 2}, TlvErrorAuthentication.Code}, // e.g. not admin
+		{[]byte{6, 1, M4}, 0xff},
+		{[]byte{}, 0xff},
+		{[]byte{6, 5, M2}, 0xff}, // truncated
+	} {
+		d := newPairingTestDevice(t, func(*http.Request, string) string { return tlvResponse(tc.tlv) })
+		err := d.PairRemove("ctrl")
+		var terr *TlvError
+		switch {
+		case tc.code == 0 && err != nil:
+			t.Fatalf("%v: unexpected error %v", tc.tlv, err)
+		case tc.code == 0xff && err == nil:
+			t.Fatalf("%v: expected error", tc.tlv)
+		case tc.code != 0 && tc.code != 0xff && (!errors.As(err, &terr) || terr.Code != tc.code):
+			t.Fatalf("%v: expected tlv error %d, got %v", tc.tlv, tc.code, err)
+		}
+	}
+}

@@ -1,11 +1,11 @@
 package hkontroller
 
 import (
+	"crypto/ed25519"
 	"crypto/md5"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"github.com/shabunin/hkontroller/ed25519"
 	"strings"
 )
 
@@ -37,40 +37,18 @@ func deleteFieldFromInterface(val *interface{}, field string) {
 	}
 }
 
-// generateKeyPair generates random public and private key pair
+// generateKeyPair generates random public and private key pair.
+// Seed is read from crypto/rand, so it has full 256 bits of entropy.
 func generateKeyPair() (KeyPair, error) {
-	str := randHex()
-	public, private, err := ed25519.GenerateKey(str)
-	return KeyPair{public[:], private[:]}, err
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return KeyPair{}, err
+	}
+	return KeyPair{public, private}, nil
 }
 
 func GenerateKeyPair() (KeyPair, error) {
 	return generateKeyPair()
-}
-
-// randomHex returns a random hex string.
-func randHex() string {
-	var b [16]byte
-	// Read might block
-	// > crypto/rand: blocked for 60 seconds waiting to read random data from the kernel
-	// > https://github.com/golang/go/commit/1961d8d72a53e780effa18bfa8dbe4e4282df0b2
-	_, err := rand.Read(b[:])
-	if err != nil {
-		panic(err)
-	}
-	var out [32]byte
-	for i := 0; i < len(b); i++ {
-		out[i*2] = btoh((b[i] >> 4) & 0xF)
-		out[i*2+1] = btoh(b[i] & 0xF)
-	}
-	return string(out[:])
-}
-
-func btoh(i byte) byte {
-	if i > 9 {
-		return 0x61 + (i - 10)
-	}
-	return 0x30 + i
 }
 
 // mac48Address returns a MAC-48-like address from the argument string

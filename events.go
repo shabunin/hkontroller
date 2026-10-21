@@ -125,6 +125,46 @@ func (d *Device) closeSubscriptions() {
 	d.removeSubs(func(*eventSub) bool { return true })
 }
 
+// supportsEvents reports if characteristic has "ev" permission.
+func supportsEvents(c *CharacteristicDescription) bool {
+	for _, pp := range c.Permissions {
+		if pp == "ev" {
+			return true
+		}
+	}
+	return false
+}
+
+// enableNewEvents enables events for characteristics of accs that are not in old,
+// if subscriptions cover them. Accessory-wide subscriptions enable events only
+// for characteristics that existed when they were made.
+func (d *Device) enableNewEvents(old []*Accessory, accs []*Accessory) error {
+	d.subscribeMu.Lock()
+	defer d.subscribeMu.Unlock()
+
+	known := make(map[[2]uint64]bool)
+	for _, aa := range old {
+		for _, ss := range aa.Ss {
+			for _, cc := range ss.Cs {
+				known[[2]uint64{aa.Id, cc.Iid}] = true
+			}
+		}
+	}
+
+	var cs []CharacteristicPut
+	for _, aa := range accs {
+		for _, ss := range aa.Ss {
+			for _, cc := range ss.Cs {
+				if known[[2]uint64{aa.Id, cc.Iid}] || !supportsEvents(cc) || !d.isCovered(aa.Id, cc.Iid) {
+					continue
+				}
+				cs = append(cs, CharacteristicPut{Aid: aa.Id, Iid: cc.Iid})
+			}
+		}
+	}
+	return d.putEvents(cs, true)
+}
+
 // eventCharacteristics returns characteristics inside of aid/iid scope.
 // For accessory or all characteristics only those supporting events are listed.
 func (d *Device) eventCharacteristics(aid int64, iid int64) []CharacteristicPut {
@@ -138,10 +178,8 @@ func (d *Device) eventCharacteristics(aid int64, iid int64) []CharacteristicPut 
 		}
 		for _, ss := range aa.Ss {
 			for _, cc := range ss.Cs {
-				for _, pp := range cc.Permissions {
-					if pp == "ev" { // supported
-						cs = append(cs, CharacteristicPut{Aid: aa.Id, Iid: cc.Iid})
-					}
+				if supportsEvents(cc) {
+					cs = append(cs, CharacteristicPut{Aid: aa.Id, Iid: cc.Iid})
 				}
 			}
 		}

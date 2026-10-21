@@ -67,6 +67,7 @@ type Device struct {
 	ss          *session
 	httpc       *http.Client // http client with encryption support
 	accs        []*Accessory
+	accsChanged chan struct{} // closed when accessories are loaded again after configuration change
 
 	subscribeMu sync.Mutex // serializes subscribe/unsubscribe requests
 	subsMu      sync.Mutex // guards subs, never held during requests
@@ -123,20 +124,21 @@ func (r *roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	case <-ctx.Done():
 		// keep the turn until late response arrives,
 		// so that next request is not sent to busy accessory
-		go r.awaitLateResponse(response, stopped, release)
+		go r.awaitLateResponse(response, stopped, release, lateResponseTimeout)
 		return nil, ctx.Err()
 	}
 }
 
 // awaitLateResponse discards response of timed out request. If it doesn't come,
 // connection is closed, since responses can't be matched to requests anymore.
-func (r *roundTripper) awaitLateResponse(response chan responseResult, stopped <-chan struct{}, release func()) {
+func (r *roundTripper) awaitLateResponse(response chan responseResult, stopped <-chan struct{}, release func(),
+	timeout time.Duration) {
 	defer release()
 	select {
 	case <-response:
 		log.Debug.Println("late response discarded")
 	case <-stopped:
-	case <-time.After(lateResponseTimeout):
+	case <-time.After(timeout):
 		log.Debug.Println("no response from accessory, closing connection")
 		r.cc.close()
 	}
@@ -497,12 +499,38 @@ func (d *Device) refreshAccessories() {
 	log.Debug.Printf("device <%s>: configuration changed, loading accessories\n", d.Name)
 	if err := d.GetAccessories(); err != nil {
 		log.Debug.Printf("device <%s>: loading accessories failed: %v\n", d.Name, err)
+		return
 	}
+
+	d.mu.Lock()
+	if d.accsChanged != nil {
+		close(d.accsChanged)
+		d.accsChanged = nil
+	}
+	d.mu.Unlock()
+}
+
+// AccessoriesChanged returns channel that is closed when accessories are loaded again,
+// because accessory reported configuration change, e.g. accessory was added to bridge.
+// Call it again to wait for next change. To not miss change, call it before Accessories:
+//
+//	changed := d.AccessoriesChanged()
+//	accs := d.Accessories()
+//	<-changed
+func (d *Device) AccessoriesChanged() <-chan struct{} {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.accsChanged == nil {
+		d.accsChanged = make(chan struct{})
+	}
+	return d.accsChanged
 }
 
 // GetAccessories sends GET /accessories request and store
 // result that can be retrieved with Accessories() method.
 // Accessories are loaded again automatically when accessory reports configuration change.
+// Events are enabled for new characteristics covered by subscriptions,
+// e.g. SubscribeToAllEvents was called before accessory was added to bridge.
 func (d *Device) GetAccessories() error {
 
 	if !d.IsVerified() {
@@ -547,12 +575,17 @@ func (d *Device) GetAccessories() error {
 	}
 
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	if d.cc != cc {
+		d.mu.Unlock()
 		return errConnClosed
 	}
+	old := d.accs
 	d.accs = accs.Accs
+	d.mu.Unlock()
 
+	if err := d.enableNewEvents(old, accs.Accs); err != nil {
+		return fmt.Errorf("enabling events: %w", err)
+	}
 	return nil
 }
 

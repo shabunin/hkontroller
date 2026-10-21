@@ -9,8 +9,9 @@ import (
 
 // Main SRP algorithm is described in http://srp.stanford.edu/design.html
 // The HAP uses the SRP-6a Stanford implementation with the following characteristics
-//      x = H(s | H(I | ":" | P)) -> called the key derivative function
-//      M1 = H(H(N) xor H(g), H(I), s, A, B, K)
+//
+//	x = H(s | H(I | ":" | P)) -> called the key derivative function
+//	M1 = H(H(N) xor H(g), H(I), s, A, B, K)
 const (
 	srpGroup = "rfc5054.3072" // N (modulo) => 384 byte
 )
@@ -65,7 +66,8 @@ func newPairSetupClientSession(serverSalt []byte, serverB []byte, pin string) (*
 }
 
 // keyDerivativeFuncRFC2945 returns the SRP-6a key derivative function which does
-//      x = H(s | H(I | ":" | P))
+//
+//	x = H(s | H(I | ":" | P))
 func keyDerivativeFuncRFC2945(h srp.HashFunc, id []byte) srp.KeyDerivationFunc {
 	return func(salt, pin []byte) []byte {
 		h := h()
