@@ -29,7 +29,7 @@ func NewFsStore(dir string) Store {
 }
 
 func (fs *fsStore) Set(key string, value []byte) error {
-	file, err := os.OpenFile(fs.filePathToFile(key), os.O_WRONLY|os.O_CREATE, 0666)
+	file, err := os.OpenFile(fs.filePathToFile(key), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
 	if err != nil {
 		return err
 	}
@@ -169,7 +169,9 @@ type entity struct {
 func (st *storer) pairingForKey(key string) (p Pairing, err error) {
 	var b []byte
 	if b, err = st.Get(key); err == nil {
-		err = json.Unmarshal(b, &p)
+		// Decoder ignores data after json value: files were not truncated
+		// on overwrite before, so shorter pairing may be followed by tail of older one
+		err = json.NewDecoder(bytes.NewReader(b)).Decode(&p)
 	}
 	return
 }

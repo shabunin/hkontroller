@@ -209,13 +209,14 @@ func (d *Device) pairSetupM5(clientSession *pairSetupClientSession) error {
 	if err != nil {
 		return &PairSetupError{"M6", err}
 	}
-	if m6enc.EncryptedData == nil && m6enc.Error != 0x00 {
+	if m6enc.Error != 0x00 {
 		return &PairSetupError{"M6", TlvErrorFromCode(m6enc.Error)}
 	}
 
-	message := m6enc.EncryptedData[:(len(m6enc.EncryptedData) - 16)]
-	var mac [16]byte
-	copy(mac[:], m6enc.EncryptedData[len(message):]) // 16 byte (MAC)
+	message, mac, err := splitMac(m6enc.EncryptedData)
+	if err != nil {
+		return &PairSetupError{"M6", err}
+	}
 
 	decrypted, err := chacha20poly1305.DecryptAndVerify(
 		clientSession.EncryptionKey[:],
@@ -224,6 +225,9 @@ func (d *Device) pairSetupM5(clientSession *pairSetupClientSession) error {
 		mac,
 		nil,
 	)
+	if err != nil {
+		return &PairSetupError{"M6", err}
+	}
 
 	m6dec := pairSetupPayload{}
 	err = tlv8.UnmarshalReader(bytes.NewReader(decrypted), &m6dec)

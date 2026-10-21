@@ -68,54 +68,42 @@ func (s *session) Encrypt(r io.Reader) (io.Reader, error) {
 	return &buf, nil
 }
 
-// Decrypt returns the decrypted data
-func (s *session) Decrypt(r io.Reader) (io.Reader, error) {
+// Decrypt reads and decrypts single packet.
+// Message may span several packets, they are joined by reader of the stream.
+func (s *session) Decrypt(r io.Reader) (*bytes.Buffer, error) {
 	s.dmu.Lock()
 	defer s.dmu.Unlock()
 
-	var buf bytes.Buffer
-	for {
-		var length uint16
-		if err := binary.Read(r, binary.LittleEndian, &length); err != nil {
-			if err == io.EOF {
-				break
-			}
-			return nil, err
-		}
-
-		var b = make([]byte, length)
-		if err := binary.Read(r, binary.LittleEndian, &b); err != nil {
-			return nil, err
-		}
-
-		var mac [16]byte
-		if err := binary.Read(r, binary.LittleEndian, &mac); err != nil {
-			return nil, err
-		}
-
-		var nonce [8]byte
-		binary.LittleEndian.PutUint64(nonce[:], s.decryptCount)
-		s.decryptCount += 1
-
-		lengthBytes := make([]byte, 2)
-		binary.LittleEndian.PutUint16(lengthBytes, length)
-
-		decrypted, err := chacha20poly1305.DecryptAndVerify(s.decryptKey[:], nonce[:], b, mac, lengthBytes)
-
-		if err != nil {
-			// TODO: examine. sometimes it doesn't decrypt data when EVENT/1.0 present
-			// 		  but if we apply decryption with counter+1 it works
-			return nil, fmt.Errorf("data encryption failed: %w", err)
-		}
-		buf.Write(decrypted)
-
-		// Finish when all bytes fit in b
-		if length < packetLengthMax {
-			break
-		}
+	var length uint16
+	if err := binary.Read(r, binary.LittleEndian, &length); err != nil {
+		return nil, err
 	}
 
-	return &buf, nil
+	var b = make([]byte, length)
+	if _, err := io.ReadFull(r, b); err != nil {
+		return nil, err
+	}
+
+	var mac [16]byte
+	if _, err := io.ReadFull(r, mac[:]); err != nil {
+		return nil, err
+	}
+
+	var nonce [8]byte
+	binary.LittleEndian.PutUint64(nonce[:], s.decryptCount)
+	s.decryptCount += 1
+
+	lengthBytes := make([]byte, 2)
+	binary.LittleEndian.PutUint16(lengthBytes, length)
+
+	decrypted, err := chacha20poly1305.DecryptAndVerify(s.decryptKey[:], nonce[:], b, mac, lengthBytes)
+	if err != nil {
+		// TODO: examine. sometimes it doesn't decrypt data when EVENT/1.0 present
+		// 		  but if we apply decryption with counter+1 it works
+		return nil, fmt.Errorf("data encryption failed: %w", err)
+	}
+
+	return bytes.NewBuffer(decrypted), nil
 }
 
 const (
