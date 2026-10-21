@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/hkontrol/dnssd"
+	"github.com/shabunin/dnssd"
 )
 
 func testEntry(iface string, port int, ips ...string) dnssd.BrowseEntry {
@@ -121,5 +121,36 @@ func TestDnssdEntryIsCopied(t *testing.T) {
 
 	if ips := dd.GetDnssdEntry().IPs; ips[0].String() != "192.168.1.2" || ips[1].String() != "fe80::1" {
 		t.Fatalf("device entry was modified from outside: %v", ips)
+	}
+}
+
+func TestLoadPairingsUnescapesNames(t *testing.T) {
+	store := NewMemStore()
+	st := storer{store}
+	if err := st.SavePairing(Pairing{Name: `Hk\ Bridge`, Id: "AA:BB"}); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := NewController(store, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.LoadPairings(); err != nil {
+		t.Fatal(err)
+	}
+
+	dd := c.GetDevice("Hk Bridge")
+	if dd == nil || !dd.IsPaired() {
+		t.Fatal("paired device should be loaded with unescaped name")
+	}
+	if pp := st.Pairings(); len(pp) != 1 || pp[0].Name != "Hk Bridge" {
+		t.Fatalf("pairing is not migrated in store: %+v", pp)
+	}
+
+	// discovery reports unescaped name, so it finds the paired device
+	e := testEntry("eth0", 51827, "192.168.1.2")
+	e.Name = "Hk Bridge"
+	if d2, discovered := c.onDnssdAdd(e); !discovered || d2 != dd {
+		t.Fatal("discovered device should be the paired one")
 	}
 }

@@ -4,10 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
-	"github.com/hkontrol/dnssd"
-	_ "github.com/hkontrol/dnssd/log"
+	"github.com/shabunin/dnssd"
+	_ "github.com/shabunin/dnssd/log"
 	"github.com/shabunin/hkontroller/log"
 )
 
@@ -246,6 +247,14 @@ func (c *Controller) LoadPairings() error {
 
 	pp := c.st.Pairings()
 	for _, p := range pp {
+		// pairings saved with older dnssd have escaped names, e.g. "My\ Bridge",
+		// discovered names are unescaped now
+		if name := strings.ReplaceAll(p.Name, `\`, ""); name != p.Name {
+			p.Name = name
+			if err := c.st.SavePairing(p); err != nil {
+				log.Info.Println("save pairing failed: ", err)
+			}
+		}
 		dd := newDevice(p.Name, c, c.name, c.localLTKP, c.localLTSK)
 		dd.setPairing(p, true)
 

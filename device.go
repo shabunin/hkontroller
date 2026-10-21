@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hkontrol/dnssd"
+	"github.com/shabunin/dnssd"
 )
 
 // closedChan is returned by Done when there is no connection.

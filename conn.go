@@ -6,7 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/hkontrol/dnssd"
+	"github.com/shabunin/dnssd"
 	"github.com/shabunin/hkontroller/log"
 	"io"
 	"net"
