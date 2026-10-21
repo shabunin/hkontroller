@@ -63,3 +63,42 @@ func TlvErrorFromCode(code byte) error {
 	}
 	return &TlvErrorUnknown
 }
+
+// CharacteristicError is returned when accessory rejects request to characteristic.
+type CharacteristicError struct {
+	Aid    uint64
+	Iid    uint64
+	Status int // one of JsonStatus* codes
+}
+
+func (e *CharacteristicError) Error() string {
+	return fmt.Sprintf("characteristic %d.%d error %d: %s", e.Aid, e.Iid, e.Status, jsonStatusMessage(e.Status))
+}
+
+func jsonStatusMessage(status int) string {
+	switch status {
+	case JsonStatusInsufficientPrivileges:
+		return "insufficient privileges"
+	case JsonStatusServiceCommunicationFailure:
+		return "unable to communicate with requested service"
+	case JsonStatusResourceBusy:
+		return "resource is busy, try again"
+	case JsonStatusReadOnlyCharacteristic:
+		return "cannot write to read only characteristic"
+	case JsonStatusWriteOnlyCharacteristic:
+		return "cannot read from write only characteristic"
+	case JsonStatusNotificationNotSupported:
+		return "notification is not supported for characteristic"
+	case JsonStatusOutOfResource:
+		return "out of resources to process request"
+	case JsonStatusOperationTimedOut:
+		return "operation timed out"
+	case JsonStatusResourceDoesNotExist:
+		return "resource does not exist"
+	case JsonStatusInvalidValueInRequest:
+		return "invalid value in request"
+	case JsonStatusInsufficientAuthorization:
+		return "insufficient authorization"
+	}
+	return "unknown"
+}

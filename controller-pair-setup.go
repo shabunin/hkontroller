@@ -275,6 +275,8 @@ func (d *Device) pairSetupM5(clientSession *pairSetupClientSession) error {
 }
 
 func (d *Device) PairSetup(pin string) error {
+	d.pairMu.Lock()
+	defer d.pairMu.Unlock()
 
 	if !d.isConnected() {
 		err := d.connect()

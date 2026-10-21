@@ -26,8 +26,11 @@ type pairVerifyM3EncPayload struct {
 	EncryptedData []byte `tlv8:"5"`
 }
 
-// PairVerify
+// PairVerify establishes encrypted session with paired device.
 func (d *Device) PairVerify() error {
+	d.pairMu.Lock()
+	defer d.pairMu.Unlock()
+
 	if !d.IsPaired() {
 		return errors.New("pair device before verifying")
 	}
@@ -39,6 +42,10 @@ func (d *Device) PairVerify() error {
 		if err != nil {
 			return err
 		}
+	}
+	cc := d.conn()
+	if cc == nil {
+		return errConnClosed
 	}
 
 	localPublic, localPrivate := curve25519.GenerateKeyPair()
@@ -194,7 +201,9 @@ func (d *Device) PairVerify() error {
 	if err != nil {
 		return &PairVerifyError{"M4", err}
 	}
-	d.setVerified(ss)
+	if err := d.setVerified(cc, ss); err != nil {
+		return &PairVerifyError{"M4", err}
+	}
 
 	return nil
 }

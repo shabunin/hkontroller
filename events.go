@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 
@@ -195,11 +194,7 @@ func (d *Device) putEvents(cs []CharacteristicPut, enable bool) error {
 		return err
 	}
 
-	if enable && res.StatusCode != http.StatusNoContent {
-		return errors.New("not 204")
-	}
-
-	return nil
+	return putResult(res)
 }
 
 func (d *Device) subscribe(aid int64, iid int64) (<-chan CharacteristicUpdate, error) {

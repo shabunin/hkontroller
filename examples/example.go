@@ -75,6 +75,13 @@ func main() {
 		}
 	}()
 
+	quit := func() {
+		for _, d := range c.GetVerifiedDevices() {
+			d.Close()
+		}
+		os.Exit(0)
+	}
+
 	var device *hkontroller.Device
 	reader := bufio.NewReader(os.Stdin)
 	for {
@@ -83,7 +90,12 @@ func main() {
 		} else {
 			fmt.Print(device.Name, "> ")
 		}
-		text, _ := reader.ReadString('\n')
+		text, err := reader.ReadString('\n')
+		if err != nil && text == "" {
+			// stdin is closed, e.g. Ctrl-D
+			fmt.Println()
+			quit()
+		}
 		text = strings.Replace(text, "\n", "", -1)
 
 		if strings.HasPrefix(text, "help") {
@@ -298,7 +310,7 @@ func main() {
 			}
 			err = device.PutCharacteristic(aid, iid, value)
 			if err != nil {
-				fmt.Println("error putting characteristic")
+				fmt.Println("error putting characteristic: ", err)
 				continue
 			}
 			fmt.Println("here comes success")
@@ -367,10 +379,7 @@ func main() {
 			}
 			fmt.Println("here comes success")
 		} else if strings.HasPrefix(text, "quit") {
-			for _, d := range c.GetVerifiedDevices() {
-				d.Close()
-			}
-			os.Exit(0)
+			quit()
 		} else {
 			fmt.Println("unknown command: ", text)
 		}

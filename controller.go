@@ -49,6 +49,15 @@ func NewController(store Store, name string) (*Controller, error) {
 
 	keypair, err := st.KeyPair()
 	if err != nil {
+		// new keypair would make all existing pairings useless,
+		// so it is generated only when there is none
+		exists, kerr := st.hasKey("keypair")
+		if kerr != nil {
+			return nil, fmt.Errorf("loading keypair failed: %v", kerr)
+		}
+		if exists {
+			return nil, fmt.Errorf("loading keypair failed: %v", err)
+		}
 		keypair, err = generateKeyPair()
 		if err != nil {
 			return nil, fmt.Errorf("generating keypair failed: %v", err)

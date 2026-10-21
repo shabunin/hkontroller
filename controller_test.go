@@ -3,6 +3,7 @@ package hkontroller
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"reflect"
@@ -392,5 +393,73 @@ func TestSplitMac(t *testing.T) {
 	msg, mac, err := splitMac(data)
 	if err != nil || string(msg) != "msg" || mac[0] != 7 || mac[15] != 7 {
 		t.Fatalf("got %q %v %v", msg, mac, err)
+	}
+}
+
+func TestKeypairIsKept(t *testing.T) {
+	store := NewMemStore()
+	c1 := newControllerWith(t, store)
+	c2 := newControllerWith(t, store)
+	if !bytes.Equal(c1.localLTSK, c2.localLTSK) {
+		t.Fatal("keypair changed on restart")
+	}
+}
+
+func TestBrokenKeypairIsNotReplaced(t *testing.T) {
+	for _, broken := range []string{`{"Public":"AAAA"`, `{"Public":"AAAA","Private":"AAAA"}`} {
+		store := NewMemStore()
+		store.Set("keypair", []byte(broken))
+		if _, err := NewController(store, "test"); err == nil {
+			t.Fatalf("%s: expected error", broken)
+		}
+		if b, _ := store.Get("keypair"); string(b) != broken {
+			t.Fatalf("%s: keypair is overwritten", broken)
+		}
+	}
+}
+
+func newControllerWith(t *testing.T, store Store) *Controller {
+	c, err := NewController(store, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+func TestParsePairings(t *testing.T) {
+	key := bytes.Repeat([]byte{9}, 32)
+	tlv := func(tag byte, val ...byte) []byte { return append([]byte{tag, byte(len(val))}, val...) }
+	join := func(parts ...[]byte) []byte { return bytes.Join(parts, nil) }
+
+	pp, err := parsePairings(join(
+		tlv(6, M2),
+		tlv(1, []byte("ctrl-1")...), tlv(3, key...), tlv(11, PermissionAdmin),
+		tlv(0xff),
+		tlv(1, []byte("ctrl-2")...), tlv(3, key...), tlv(11),
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pp) != 2 || pp[0].Id != "ctrl-1" || pp[0].Permission != PermissionAdmin ||
+		pp[1].Id != "ctrl-2" || !bytes.Equal(pp[1].PublicKey, key) {
+		t.Fatalf("got %+v", pp)
+	}
+
+	// e.g. controller without admin permission
+	_, err = parsePairings(join(tlv(6, M2), tlv(7, 2)))
+	var terr *TlvError
+	if !errors.As(err, &terr) || terr.Code != 2 {
+		t.Fatalf("expected authentication error, got %v", err)
+	}
+
+	for _, b := range [][]byte{
+		join(tlv(6, M4), tlv(1, 'a')), // wrong state
+		join(tlv(1, 'a')),             // no state
+		{6, 1},                        // truncated
+		{},
+	} {
+		if _, err := parsePairings(b); err == nil {
+			t.Fatalf("%v: expected error", b)
+		}
 	}
 }

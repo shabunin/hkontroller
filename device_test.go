@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -13,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/shabunin/dnssd"
 )
 
 // fakeAccessory answers requests on the other side of net.Pipe without encryption.
@@ -602,5 +605,118 @@ func TestPairVerifyShortEncryptedData(t *testing.T) {
 
 	if err := d.PairVerify(); err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func multiStatus(body string) string {
+	return fmt.Sprintf("HTTP/1.1 207 Multi-Status\r\nContent-Type: application/hap+json\r\nContent-Length: %d\r\n\r\n%s",
+		len(body), body)
+}
+
+func TestPutCharacteristicError(t *testing.T) {
+	var response string
+	d, _ := newTestDevice(t, func(*http.Request, string) string { return response })
+
+	response = noContent(nil, "")
+	if err := d.PutCharacteristic(1, 10, true); err != nil {
+		t.Fatalf("success: %v", err)
+	}
+
+	response = multiStatus(`{"characteristics":[{"aid":1,"iid":10,"status":-70404}]}`)
+	err := d.PutCharacteristic(1, 10, true)
+	var cerr *CharacteristicError
+	if !errors.As(err, &cerr) || cerr.Aid != 1 || cerr.Iid != 10 || cerr.Status != JsonStatusReadOnlyCharacteristic {
+		t.Fatalf("expected read only error, got %v", err)
+	}
+
+	response = fmt.Sprintf("HTTP/1.1 400 Bad Request\r\nContent-Length: 17\r\n\r\n%s", `{"status":-70410}`)
+	if err := d.PutCharacteristic(1, 10, true); err == nil {
+		t.Fatal("expected error for bad request")
+	}
+}
+
+func TestSubscribeRejected(t *testing.T) {
+	d, _ := newTestDevice(t, func(*http.Request, string) string {
+		return multiStatus(`{"characteristics":[{"aid":1,"iid":10,"status":-70406}]}`)
+	})
+	if _, err := d.SubscribeToEvents(1, 10); err == nil {
+		t.Fatal("expected error")
+	}
+	if d.isCovered(1, 10) {
+		t.Fatal("rejected subscription is kept")
+	}
+}
+
+func TestMalformedResponseClosesConnection(t *testing.T) {
+	d, _ := newTestDevice(t, func(*http.Request, string) string { return "garbage\r\n\r\n" })
+	if _, err := getWithTimeout(d, "/characteristics?id=1.2", time.Second); err == nil {
+		t.Fatal("expected error")
+	}
+	waitDone(t, d.Done())
+}
+
+func TestSetVerifiedOnClosedConnection(t *testing.T) {
+	d, _ := newTestDevice(t, noContent)
+	cc := d.conn()
+	d.Close() // e.g. device lost during pair-verify
+
+	if err := d.setVerified(cc, &session{}); err == nil {
+		t.Fatal("expected error")
+	}
+	if d.IsVerified() {
+		t.Fatal("closed device is verified")
+	}
+}
+
+// pair-verify requests from several goroutines must share one connection
+func TestPairVerifyOpensSingleConnection(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	var mu sync.Mutex
+	accepted := 0
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			accepted++
+			mu.Unlock()
+			acc := &fakeAccessory{t: t, conn: conn, handle: func(*http.Request, string) string {
+				// M2 with authentication error
+				tlv := []byte{6, 1, M2, 7, 1, 2}
+				return fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s", len(tlv), tlv)
+			}}
+			go acc.serve()
+		}
+	}()
+
+	d := newDevice("test", nil, "ctrl", nil, nil)
+	d.addDnssdEntry(dnssd.BrowseEntry{Name: "test", IfaceName: "lo", Port: ln.Addr().(*net.TCPAddr).Port,
+		IPs: []net.IP{net.ParseIP("127.0.0.1")}})
+	d.setPairing(Pairing{Name: "test", Id: "AA"}, true)
+	defer d.Close()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := d.PairVerify(); err == nil {
+				t.Error("expected error")
+			}
+		}()
+	}
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if accepted != 1 {
+		t.Fatalf("%d connections opened", accepted)
 	}
 }

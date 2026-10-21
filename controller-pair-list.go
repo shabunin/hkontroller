@@ -2,7 +2,6 @@ package hkontroller
 
 import (
 	"bytes"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -42,74 +41,53 @@ func (d *Device) ListPairings() ([]Pairing, error) {
 	}
 	res := resp.Body
 	defer res.Close()
-
-	var tag byte
-	err = binary.Read(res, binary.BigEndian, &tag)
+	all, err := io.ReadAll(res)
 	if err != nil {
 		return nil, err
 	}
-	var leng byte
-	err = binary.Read(res, binary.BigEndian, &leng)
-	if err != nil {
-		return nil, err
-	}
-	val := make([]byte, leng)
-	err = binary.Read(res, binary.BigEndian, &val)
-	if err != nil {
-		return nil, err
-	}
+	return parsePairings(all)
+}
 
-	if tag != 6 && val[0] != M2 {
-		return nil, errors.New("wrong response")
-	}
-
+// parsePairings parses list pairings response: state, then pairings
+// separated by 0xff item, or state and error.
+func parsePairings(b []byte) ([]Pairing, error) {
 	var result []Pairing
-
 	var pp Pairing
-	for err == nil {
-		var tag byte
-		err = binary.Read(res, binary.BigEndian, &tag)
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return nil, err
+	var state byte
+	for len(b) > 0 {
+		if len(b) < 2 || len(b) < 2+int(b[1]) {
+			return nil, errors.New("truncated response")
 		}
-		var leng byte
-		err = binary.Read(res, binary.BigEndian, &leng)
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return nil, err
-		}
+		tag, val := b[0], b[2:2+int(b[1])]
+		b = b[2+len(val):]
 
-		if tag == 0xff {
-			// separator
+		switch tag {
+		case 6:
+			if len(val) > 0 {
+				state = val[0]
+			}
+		case 7:
+			if len(val) > 0 {
+				return nil, TlvErrorFromCode(val[0])
+			}
+		case 1:
+			pp.Id = string(val)
+		case 3:
+			pp.PublicKey = append([]byte(nil), val...)
+		case 11:
+			if len(val) > 0 {
+				pp.Permission = val[0]
+			}
+		case 0xff:
 			result = append(result, pp)
 			pp = Pairing{}
-			continue
-		}
-		val := make([]byte, leng)
-		err = binary.Read(res, binary.BigEndian, &val)
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return nil, err
-		}
-		if tag == 1 {
-			pp.Id = string(val)
-		} else if tag == 3 {
-			pp.PublicKey = val
-		} else if tag == 11 {
-			pp.Permission = val[0]
 		}
 	}
-	if err == io.EOF {
+	if state != M2 {
+		return nil, fmt.Errorf("unexpected state %x, expected: %x", state, M2)
+	}
+	if pp.Id != "" {
 		result = append(result, pp)
-		err = nil
 	}
-
 	return result, nil
 }
