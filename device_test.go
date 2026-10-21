@@ -720,3 +720,193 @@ func TestPairVerifyOpensSingleConnection(t *testing.T) {
 		t.Fatalf("%d connections opened", accepted)
 	}
 }
+
+func tlvResponse(tlv []byte) string {
+	return fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s", len(tlv), tlv)
+}
+
+// newPairingTestDevice returns connected device before pair-verify, without encryption and background read.
+func newPairingTestDevice(t *testing.T, handle func(*http.Request, string) string) *Device {
+	client, server := net.Pipe()
+	t.Cleanup(func() { server.Close() })
+	go (&fakeAccessory{t: t, conn: server, handle: handle}).serve()
+
+	d := newDevice("test", nil, "ctrl", nil, nil)
+	d.cc = newConn(client)
+	d.httpc = &http.Client{Transport: newRoundTripper(d.cc)}
+	return d
+}
+
+// attach puts device into controller, advertised with accessory id.
+func attach(c *Controller, d *Device, id string) dnssd.BrowseEntry {
+	e := testEntry("eth0", 51827, "192.168.1.2")
+	e.Name = d.Name
+	e.Text = map[string]string{"id": id, "c#": "1"}
+	d.ctrl = c
+	d.id = deviceKey(e)
+	c.putDevice(d)
+	d.addDnssdEntry(e)
+	return e
+}
+
+func TestLostPairedDeviceKeepsConnection(t *testing.T) {
+	c := newTestController(t)
+	d, _ := newTestDevice(t, func(*http.Request, string) string { return characteristicResponse(1, 2, 1) })
+	e := attach(c, d, "AA:BB")
+	d.setPairing(Pairing{Name: d.Name, Id: "AA:BB"}, true)
+
+	if _, lost := c.onDnssdRemove(e); !lost {
+		t.Fatal("device should be lost")
+	}
+	select {
+	case <-d.Done():
+		t.Fatalf("connection closed: %v", d.CloseReason())
+	default:
+	}
+	if _, err := d.GetCharacteristic(1, 2); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLostUnpairedDeviceIsClosed(t *testing.T) {
+	c := newTestController(t)
+	d, _ := newTestDevice(t, noContent)
+	e := attach(c, d, "AA:BB")
+
+	if _, lost := c.onDnssdRemove(e); !lost {
+		t.Fatal("device should be lost")
+	}
+	waitDone(t, d.Done())
+	if c.GetDevice(d.Name) != nil {
+		t.Fatal("lost unpaired device should be removed")
+	}
+}
+
+func setAccessories(d *Device, accs []*Accessory) {
+	d.mu.Lock()
+	d.accs = accs
+	d.mu.Unlock()
+}
+
+func TestAccessoriesAreCopies(t *testing.T) {
+	d, acc := newTestDevice(t, noContent)
+	setAccessories(d, testAccessories())
+	ch, err := d.SubscribeToAllEvents()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	accs := d.Accessories()
+	accs[0].Ss[0].Cs[0].Value = "changed by user"
+	if v := d.Accessories()[0].Ss[0].Cs[0].Value; v != nil {
+		t.Fatalf("device accessories are modified from outside: %v", v)
+	}
+
+	// read values while events update them, race detector tells
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 100; i++ {
+			for _, c := range d.Accessories()[0].Ss[0].Cs {
+				_ = fmt.Sprint(c.Value)
+			}
+		}
+	}()
+	for i := 0; i < 20; i++ {
+		acc.write(eventMessage(1, 2, i))
+		receive(t, ch)
+	}
+	<-done
+
+	if v := d.Accessories()[0].Ss[0].Cs[0].Value; v != float64(19) {
+		t.Fatalf("value is not updated by event: %v", v)
+	}
+}
+
+func TestConfigChangeReloadsAccessories(t *testing.T) {
+	var mu sync.Mutex
+	body := `{"accessories":[{"aid":1,"services":[]}]}`
+	d, _ := newTestDevice(t, func(req *http.Request, _ string) string {
+		mu.Lock()
+		defer mu.Unlock()
+		return jsonResponse(body)
+	})
+	setAccessories(d, []*Accessory{{Id: 1}})
+	c := newTestController(t)
+	e := attach(c, d, "AA:BB")
+
+	// same configuration
+	c.onDnssdAdd(e)
+	if len(d.Accessories()) != 1 {
+		t.Fatal("accessories should stay")
+	}
+
+	// accessory added on bridge
+	mu.Lock()
+	body = `{"accessories":[{"aid":1,"services":[]},{"aid":2,"services":[]}]}`
+	mu.Unlock()
+	e.Text = map[string]string{"id": "AA:BB", "c#": "2"}
+	c.onDnssdAdd(e)
+
+	deadline := time.Now().Add(time.Second)
+	for len(d.Accessories()) != 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("accessories are not reloaded after configuration change")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestGetCharacteristicError(t *testing.T) {
+	d, _ := newTestDevice(t, func(*http.Request, string) string {
+		return multiStatus(`{"characteristics":[{"aid":1,"iid":4,"status":-70405}]}`)
+	})
+	_, err := d.GetCharacteristic(1, 4)
+	var cerr *CharacteristicError
+	if !errors.As(err, &cerr) || cerr.Status != JsonStatusWriteOnlyCharacteristic {
+		t.Fatalf("expected write only error, got %v", err)
+	}
+}
+
+func TestGetAccessoriesError(t *testing.T) {
+	d, _ := newTestDevice(t, func(*http.Request, string) string {
+		return "HTTP/1.1 470 Connection Authorization Required\r\nContent-Length: 17\r\n\r\n{\"status\":-70411}"
+	})
+	setAccessories(d, testAccessories())
+	if err := d.GetAccessories(); err == nil {
+		t.Fatal("expected error")
+	}
+	if len(d.Accessories()) == 0 {
+		t.Fatal("accessories loaded before should stay")
+	}
+}
+
+func TestPairingBackoff(t *testing.T) {
+	d := newPairingTestDevice(t, func(*http.Request, string) string {
+		// M2 with backoff error, retry in 300 seconds
+		return tlvResponse([]byte{6, 1, M2, 7, 1, 3, 8, 2, 0x2c, 0x01})
+	})
+	_, err := d.pairSetupM1("031-45-154")
+	var berr *BackoffError
+	if !errors.As(err, &berr) || berr.RetryDelay != 300*time.Second {
+		t.Fatalf("expected backoff for 300s, got %v", err)
+	}
+	var terr *TlvError
+	if !errors.As(err, &terr) || terr.Code != TlvErrorBackoff.Code {
+		t.Fatalf("backoff should be tlv error, got %v", err)
+	}
+}
+
+func TestPairSetupErrorWithSalt(t *testing.T) {
+	d := newPairingTestDevice(t, func(*http.Request, string) string {
+		// M2 with error, but salt and public key present
+		tlv := append([]byte{6, 1, M2, 7, 1, 6, 2, 16}, make([]byte, 16)...)
+		tlv = append(append(tlv, 3, 32), make([]byte, 32)...)
+		return tlvResponse(tlv)
+	})
+	_, err := d.pairSetupM1("031-45-154")
+	var terr *TlvError
+	if !errors.As(err, &terr) || terr.Code != TlvErrorUnavailable.Code {
+		t.Fatalf("expected unavailable error, got %v", err)
+	}
+}

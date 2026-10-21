@@ -57,7 +57,8 @@ func main() {
 		for d := range discoverCh {
 			devices = append(devices, d)
 			fmt.Println("discovered: ", d.Name)
-			if d.IsPaired() {
+			// connection of paired device survives mdns loss, so it may be verified already
+			if d.IsPaired() && !d.IsVerified() {
 				fmt.Println("already paired, establishing connection")
 				go verify(d)
 			}
@@ -105,6 +106,7 @@ func main() {
 			fmt.Println("if device selected:")                                  // done
 			fmt.Println("          pair <pin>")                                 // done
 			fmt.Println("          unpair")                                     // done
+			fmt.Println("          forget")                                     // done
 			fmt.Println("          accessories")                                // done
 			fmt.Println("          get <aid> <iid>")                            // done
 			fmt.Println("          put <aid> <iid> <type:number/bool> <value>") // done
@@ -144,7 +146,7 @@ func main() {
 					continue
 				}
 				str := strconv.FormatInt(int64(i), 10) + "\t"
-				str += d.Name + "\t" + d.Name
+				str += d.Id() + "\t" + d.Name
 				if d.IsDiscovered() {
 					str += "\tdiscovered"
 				} else {
@@ -195,6 +197,13 @@ func main() {
 				fmt.Println("unpair err: ", err)
 			}
 			fmt.Println("should not be paired anymore")
+		} else if strings.HasPrefix(text, "forget") {
+			if device == nil {
+				fmt.Println("no device selected")
+				continue
+			}
+			device.ForgetPairing()
+			fmt.Println("pairing forgotten, accessory is not asked")
 		} else if strings.HasPrefix(text, "accessories") {
 			if device == nil {
 				fmt.Println("no device selected")

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"reflect"
 	"sync"
 	"testing"
@@ -461,5 +462,105 @@ func TestParsePairings(t *testing.T) {
 		if _, err := parsePairings(b); err == nil {
 			t.Fatalf("%v: expected error", b)
 		}
+	}
+}
+
+func entryWithId(name string, id string) dnssd.BrowseEntry {
+	e := entryNamed(name)
+	e.Text = map[string]string{"id": id}
+	return e
+}
+
+func TestRenamedDeviceKeepsPairing(t *testing.T) {
+	store := NewMemStore()
+	st := storer{store}
+	st.SavePairing(Pairing{Name: "Old Name", Id: "aa:bb"})
+	c := newControllerWith(t, store)
+	c.LoadPairings()
+
+	dd, discovered := c.onDnssdAdd(entryWithId("New Name", "AA:BB"))
+	if !discovered || !dd.IsPaired() || dd.Id() != "AA:BB" {
+		t.Fatal("renamed accessory should be found by id")
+	}
+	if len(c.GetAllDevices()) != 1 {
+		t.Fatalf("got %d devices", len(c.GetAllDevices()))
+	}
+	if _, lost := c.onDnssdRemove(entryWithId("New Name", "AA:BB")); !lost {
+		t.Fatal("device should be lost")
+	}
+}
+
+func TestOtherAccessoryWithSameName(t *testing.T) {
+	store := NewMemStore()
+	(&storer{store}).SavePairing(Pairing{Name: "Bridge", Id: "AA:BB"})
+	c := newControllerWith(t, store)
+	c.LoadPairings()
+
+	// paired bridge is offline, another one took its name
+	dd, discovered := c.onDnssdAdd(entryWithId("Bridge", "CC:DD"))
+	if !discovered || dd.IsPaired() {
+		t.Fatal("other accessory should not get pairing")
+	}
+	if len(c.GetAllDevices()) != 2 {
+		t.Fatalf("got %d devices", len(c.GetAllDevices()))
+	}
+	if c.GetDevice("Bridge") != dd {
+		t.Fatal("discovered device should be preferred by name")
+	}
+}
+
+func TestRenameWhileOnline(t *testing.T) {
+	c := newTestController(t)
+	dd, _ := c.onDnssdAdd(entryWithId("A", "AA:BB"))
+
+	// new name announced before old one is removed
+	if _, discovered := c.onDnssdAdd(entryWithId("B", "AA:BB")); discovered {
+		t.Fatal("device is discovered already")
+	}
+	if _, lost := c.onDnssdRemove(entryWithId("A", "AA:BB")); lost {
+		t.Fatal("removal of old name should not lose device")
+	}
+	if !dd.IsDiscovered() || dd.GetDnssdEntry().Name != "B" {
+		t.Fatalf("device should be advertised as B: %+v", dd.GetDnssdEntry())
+	}
+}
+
+func TestUnpairFailureKeepsPairing(t *testing.T) {
+	store := NewMemStore()
+	(&storer{store}).SavePairing(Pairing{Name: "Bridge", Id: "AA:BB"})
+	c := newControllerWith(t, store)
+	c.LoadPairings()
+	dd := c.GetDevice("Bridge")
+
+	// not connected, so request fails
+	if err := dd.Unpair(); err == nil {
+		t.Fatal("expected error")
+	}
+	if !dd.IsPaired() || len((&storer{store}).Pairings()) != 1 {
+		t.Fatal("pairing should be kept")
+	}
+
+	dd.ForgetPairing()
+	if dd.IsPaired() || len((&storer{store}).Pairings()) != 0 || c.GetDevice("Bridge") != nil {
+		t.Fatal("pairing should be forgotten")
+	}
+}
+
+func TestFsStoreWrites(t *testing.T) {
+	dir := t.TempDir()
+	st := NewFsStore(dir)
+	for i := 0; i < 3; i++ {
+		if err := st.Set("key", []byte(fmt.Sprint(i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if b, err := st.Get("key"); err != nil || string(b) != "2" {
+		t.Fatalf("got %q, %v", b, err)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Fatalf("temporary files left: %v", entries)
+	}
+	if _, err := st.Get("missing"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected not exist error, got %v", err)
 	}
 }

@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,38 +29,34 @@ func NewFsStore(dir string) Store {
 	return &fsStore{dir}
 }
 
+// Set writes value to temporary file and renames it, so crash during write
+// never leaves file half written: keypair would be lost with all pairings.
 func (fs *fsStore) Set(key string, value []byte) error {
-	file, err := os.OpenFile(fs.filePathToFile(key), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
+	path := fs.filePathToFile(key)
+	// suffix differs from keys, so KeysWithSuffix never lists temporary files
+	file, err := os.CreateTemp(fs.Path, filepath.Base(path)+".*.tmp")
 	if err != nil {
 		return err
 	}
+	tmp := file.Name()
+	defer os.Remove(tmp) // no-op after rename
 
-	defer file.Close()
-
-	_, err = file.Write(value)
-	return err
+	if _, err := file.Write(value); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 func (fs *fsStore) Get(key string) ([]byte, error) {
-	file, err := os.OpenFile(fs.filePathToFile(key), os.O_RDONLY, 0666)
-	if err != nil {
-		return nil, err
-	}
-
-	defer file.Close()
-
-	var b bytes.Buffer
-	var buffer = make([]byte, 32)
-	for {
-		n, _ := file.Read(buffer)
-		if n > 0 {
-			b.Write(buffer[:n])
-		} else {
-			break
-		}
-	}
-
-	return b.Bytes(), nil
+	return os.ReadFile(fs.filePathToFile(key))
 }
 
 // Delete removes the file for the corresponding key.
@@ -70,12 +65,12 @@ func (fs *fsStore) Delete(key string) error {
 }
 
 func (fs *fsStore) KeysWithSuffix(suffix string) (keys []string, err error) {
-	var infos []os.FileInfo
+	var entries []os.DirEntry
 
-	if infos, err = ioutil.ReadDir(fs.Path); err == nil {
-		for _, info := range infos {
-			if info.IsDir() == false && strings.HasSuffix(info.Name(), suffix) == true {
-				keys = append(keys, info.Name())
+	if entries, err = os.ReadDir(fs.Path); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), suffix) {
+				keys = append(keys, e.Name())
 			}
 		}
 	}

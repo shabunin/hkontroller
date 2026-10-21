@@ -61,15 +61,27 @@ func (d *Device) PairRemove(controllerId string) error {
 	return nil
 }
 
+// Unpair removes pairing of this controller from accessory, then forgets it.
+// If request fails, pairing is kept, so it can be retried: accessory would
+// stay paired with controller that doesn't know it anymore.
+// See ForgetPairing for accessory that was reset or is gone.
 func (d *Device) Unpair() error {
 	log.Debug.Println("d.Unpair()")
 
-	err := d.PairRemove(d.controllerId)
+	if err := d.PairRemove(d.controllerId); err != nil {
+		return err
+	}
+	d.ForgetPairing()
+	return nil
+}
 
-	// forget pairing even if request failed
+// ForgetPairing forgets pairing without asking accessory,
+// e.g. it was reset to factory settings or doesn't exist anymore.
+func (d *Device) ForgetPairing() {
 	if d.ctrl != nil {
 		d.ctrl.onUnpaired(d)
+		return
 	}
-
-	return err
+	d.setPairing(Pairing{}, false)
+	d.close(errors.New("device unpaired"))
 }
