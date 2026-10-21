@@ -19,3 +19,17 @@ func (s *ServiceDescription) GetCharacteristic(characteristicType HapCharacteris
 
 	return nil
 }
+
+func (s *ServiceDescription) clone() *ServiceDescription {
+	res := *s
+	res.Linked = append([]uint64(nil), s.Linked...)
+	res.Cs = make([]*CharacteristicDescription, len(s.Cs))
+	for i, c := range s.Cs {
+		cc := *c
+		cc.Permissions = append([]string(nil), c.Permissions...)
+		cc.ValidValues = append([]int(nil), c.ValidValues...)
+		cc.ValidRange = append([]int(nil), c.ValidRange...)
+		res.Cs[i] = &cc
+	}
+	return &res
+}

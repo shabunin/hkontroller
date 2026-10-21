@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,7 +36,11 @@ var pairingTimeout = 60 * time.Second
 var lateResponseTimeout = reqTimeout
 
 type Device struct {
+	// Name is mdns name device had when it was discovered or paired first time.
+	// Accessory may be renamed later, current name is in GetDnssdEntry.
 	Name string
+
+	id string // accessory id, key in controller devices
 
 	ctrl *Controller
 
@@ -51,6 +56,7 @@ type Device struct {
 	mu sync.Mutex
 
 	dnssdEntries map[string]dnssd.BrowseEntry // mdns entries by interface name
+	configNumber string                       // c# txt record, changes when accessories change
 
 	pairing Pairing
 	paired  bool // completed /pair-setup?
@@ -171,17 +177,36 @@ func newDevice(name string, ctrl *Controller,
 
 func copyEntry(e dnssd.BrowseEntry) dnssd.BrowseEntry {
 	e.IPs = append([]net.IP(nil), e.IPs...)
+	text := make(map[string]string, len(e.Text))
+	for k, v := range e.Text {
+		text[k] = v
+	}
+	e.Text = text
 	return e
 }
 
+// Id returns accessory pairing id, e.g. "0E:AA:BB:CC:DD:05".
+// Unlike name, it doesn't change. Empty if accessory doesn't advertise it.
+func (d *Device) Id() string {
+	if strings.HasPrefix(d.id, namePrefix) {
+		return ""
+	}
+	return d.id
+}
+
 // addDnssdEntry stores entry of interface where device is advertised.
-// Returns true if device was not discovered before.
-func (d *Device) addDnssdEntry(e dnssd.BrowseEntry) bool {
+// Returns true if device was not discovered before,
+// and true if accessory configuration number changed.
+func (d *Device) addDnssdEntry(e dnssd.BrowseEntry) (first bool, configChanged bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	first := len(d.dnssdEntries) == 0
+	first = len(d.dnssdEntries) == 0
 	d.dnssdEntries[e.IfaceName] = copyEntry(e)
-	return first
+	if cn := e.Text["c#"]; cn != "" {
+		configChanged = d.configNumber != "" && cn != d.configNumber
+		d.configNumber = cn
+	}
+	return first, configChanged
 }
 
 // removeDnssdEntry forgets entry of interface.
@@ -190,8 +215,8 @@ func (d *Device) removeDnssdEntry(e dnssd.BrowseEntry) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	old, ok := d.dnssdEntries[e.IfaceName]
-	if !ok || old.Port != e.Port {
-		// unknown or already replaced by entry with new port
+	if !ok || old.Port != e.Port || old.Name != e.Name {
+		// unknown or already replaced by entry with new port or name
 		return false
 	}
 	delete(d.dnssdEntries, e.IfaceName)
@@ -425,21 +450,65 @@ func (d *Device) CloseReason() error {
 	return d.closeReason
 }
 
-// Accessories return list of previously discovered accessories.
+// Accessories return copy of previously discovered accessories.
 // GetAccessories should be called prior to this call.
+// Values are updated by events of subscribed characteristics,
+// call Accessories again to get them.
 func (d *Device) Accessories() []*Accessory {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.accs
+	if d.accs == nil {
+		return nil
+	}
+	res := make([]*Accessory, len(d.accs))
+	for i, a := range d.accs {
+		res[i] = a.clone()
+	}
+	return res
+}
+
+// setValue updates value of characteristic in accessories.
+func (d *Device) setValue(aid uint64, iid uint64, val interface{}) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, aa := range d.accs {
+		if aa.Id != aid {
+			continue
+		}
+		for _, ss := range aa.Ss {
+			for _, cc := range ss.Cs {
+				if cc.Iid == iid {
+					cc.Value = val
+				}
+			}
+		}
+	}
+}
+
+// refreshAccessories loads accessories again after configuration change,
+// if they were loaded before.
+func (d *Device) refreshAccessories() {
+	d.mu.Lock()
+	loaded := d.accs != nil && d.verified
+	d.mu.Unlock()
+	if !loaded {
+		return
+	}
+	log.Debug.Printf("device <%s>: configuration changed, loading accessories\n", d.Name)
+	if err := d.GetAccessories(); err != nil {
+		log.Debug.Printf("device <%s>: loading accessories failed: %v\n", d.Name, err)
+	}
 }
 
 // GetAccessories sends GET /accessories request and store
 // result that can be retrieved with Accessories() method.
+// Accessories are loaded again automatically when accessory reports configuration change.
 func (d *Device) GetAccessories() error {
 
 	if !d.IsVerified() {
 		return errors.New("paired device not verified or not connected")
 	}
+	cc := d.conn()
 
 	ctx, cancel := context.WithTimeout(context.Background(), reqTimeout)
 	defer cancel()
@@ -455,6 +524,9 @@ func (d *Device) GetAccessories() error {
 
 	all, err := io.ReadAll(res.Body)
 	if err != nil {
+		return err
+	}
+	if err := responseError(res, all); err != nil {
 		return err
 	}
 
@@ -475,8 +547,11 @@ func (d *Device) GetAccessories() error {
 	}
 
 	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.cc != cc {
+		return errConnClosed
+	}
 	d.accs = accs.Accs
-	d.mu.Unlock()
 
 	return nil
 }
@@ -501,6 +576,9 @@ func (d *Device) GetCharacteristic(aid uint64, cid uint64) (CharacteristicDescri
 
 	all, err := io.ReadAll(res.Body)
 	if err != nil {
+		return CharacteristicDescription{}, err
+	}
+	if err := responseError(res, all); err != nil {
 		return CharacteristicDescription{}, err
 	}
 
@@ -552,24 +630,30 @@ func (d *Device) PutCharacteristic(aid uint64, cid uint64, val interface{}) erro
 }
 
 // putResult returns error of PUT /characteristics response.
-// On success accessory answers 204 No Content, otherwise it lists status
-// of every characteristic, e.g. {"characteristics":[{"aid":1,"iid":12,"status":-70402}]}
 func putResult(res *http.Response) error {
-	if res.StatusCode == http.StatusNoContent {
-		return nil
-	}
-
 	all, err := io.ReadAll(res.Body)
 	if err != nil {
 		return err
+	}
+	return responseError(res, all)
+}
+
+// responseError returns error of /accessories or /characteristics response.
+// PUT succeeds with 204 No Content. When request fails for some characteristics,
+// accessory lists status of every one with 207 Multi-Status,
+// e.g. {"characteristics":[{"aid":1,"iid":12,"status":-70402}]},
+// or reports status of whole request, e.g. {"status":-70401}.
+func responseError(res *http.Response, body []byte) error {
+	if res.StatusCode == http.StatusNoContent {
+		return nil
 	}
 
 	var payload struct {
 		Characteristics []CharacteristicDescription `json:"characteristics"`
 		Status          *int                        `json:"status"`
 	}
-	if err := json.Unmarshal(all, &payload); err != nil {
-		return fmt.Errorf("unexpected response %d: %q", res.StatusCode, all)
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return fmt.Errorf("unexpected response %d: %q", res.StatusCode, body)
 	}
 	for _, c := range payload.Characteristics {
 		if c.Status != nil && *c.Status != JsonStatusSuccess {

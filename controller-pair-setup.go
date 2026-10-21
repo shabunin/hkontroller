@@ -62,20 +62,17 @@ func (d *Device) pairSetupM1(pin string) (*pairSetupClientSession, error) {
 		return nil, &PairSetupError{"M1", err}
 	}
 
-	salt := m2.Salt
-	_ = salt
-	remotePubk := m2.PublicKey
-	_ = remotePubk
-	state := m2.State
-	m2err := m2.Error
-	if state != M2 {
-		return nil, &PairSetupError{"M2", fmt.Errorf("unexpected state %x, expected: %x", state, M2)}
+	if m2.State != M2 {
+		return nil, &PairSetupError{"M2", fmt.Errorf("unexpected state %x, expected: %x", m2.State, M2)}
 	}
-	if salt == nil && remotePubk == nil && m2err != 0x00 {
-		return nil, &PairSetupError{"M2", TlvErrorFromCode(m2err)}
+	if err := pairingError(m2); err != nil {
+		return nil, &PairSetupError{"M2", err}
+	}
+	if len(m2.Salt) == 0 || len(m2.PublicKey) == 0 {
+		return nil, &PairSetupError{"M2", errors.New("no salt or public key")}
 	}
 
-	clientSession, err := newPairSetupClientSession(salt, remotePubk, pin)
+	clientSession, err := newPairSetupClientSession(m2.Salt, m2.PublicKey, pin)
 	if err != nil {
 		return nil, &PairSetupError{"M2", err}
 	}
@@ -115,16 +112,14 @@ func (d *Device) pairSetupM3(clientSession *pairSetupClientSession) error {
 		return &PairSetupError{"M3", err}
 	}
 
-	state := m4.State
-	if state != M4 {
-		return &PairSetupError{"M4", fmt.Errorf("unexpected state %x, expected: %x", state, M4)}
+	if m4.State != M4 {
+		return &PairSetupError{"M4", fmt.Errorf("unexpected state %x, expected: %x", m4.State, M4)}
 	}
-	serverProof := m4.Proof
-	m4err := m4.Error
-	if serverProof == nil && m4err != 0x00 {
-		return &PairSetupError{"M4", TlvErrorFromCode(m4err)}
+	// e.g. wrong setup code
+	if err := pairingError(m4); err != nil {
+		return &PairSetupError{"M4", err}
 	}
-	serverProofValid := clientSession.session.VerifyServerAuthenticator(serverProof)
+	serverProofValid := clientSession.session.VerifyServerAuthenticator(m4.Proof)
 	if !serverProofValid {
 		return &PairSetupError{"M4", errors.New("server proof is not valid")}
 	}
@@ -209,8 +204,8 @@ func (d *Device) pairSetupM5(clientSession *pairSetupClientSession) error {
 	if err != nil {
 		return &PairSetupError{"M6", err}
 	}
-	if m6enc.Error != 0x00 {
-		return &PairSetupError{"M6", TlvErrorFromCode(m6enc.Error)}
+	if err := pairingError(m6enc); err != nil {
+		return &PairSetupError{"M6", err}
 	}
 
 	message, mac, err := splitMac(m6enc.EncryptedData)
@@ -239,8 +234,8 @@ func (d *Device) pairSetupM5(clientSession *pairSetupClientSession) error {
 	//if m6dec.State != M6 {
 	//	return errors.New("expected state M6")
 	//}
-	if m6dec.PublicKey == nil && m6dec.Error != 0x00 {
-		return &PairSetupError{"M6", TlvErrorFromCode(m6dec.Error)}
+	if err := pairingError(m6dec); err != nil {
+		return &PairSetupError{"M6", err}
 	}
 
 	accessoryId := m6dec.Identifier

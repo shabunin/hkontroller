@@ -1,6 +1,9 @@
 package hkontroller
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 type PairVerifyError struct {
 	Step string
@@ -54,6 +57,31 @@ var (
 		TlvErrorMaxTries, TlvErrorUnavailable, TlvErrorBusy,
 	}
 )
+
+// BackoffError is returned when accessory asks to wait before next pairing attempt.
+// It wraps TlvErrorBackoff.
+type BackoffError struct {
+	RetryDelay time.Duration
+}
+
+func (e *BackoffError) Error() string {
+	return fmt.Sprintf("%v, retry in %v", &TlvErrorBackoff, e.RetryDelay)
+}
+
+func (e *BackoffError) Unwrap() error {
+	return &TlvErrorBackoff
+}
+
+// pairingError returns error reported in pairing response, or nil.
+func pairingError(m pairSetupPayload) error {
+	if m.Error == 0 {
+		return nil
+	}
+	if m.Error == TlvErrorBackoff.Code {
+		return &BackoffError{RetryDelay: time.Duration(m.RetryDelay) * time.Second}
+	}
+	return TlvErrorFromCode(m.Error)
+}
 
 func TlvErrorFromCode(code byte) error {
 	for _, e := range tlvErrors {

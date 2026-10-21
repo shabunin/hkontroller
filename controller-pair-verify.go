@@ -79,8 +79,11 @@ func (d *Device) PairVerify() error {
 	if m2.State != M2 {
 		return &PairVerifyError{"M2", fmt.Errorf("unexpected state %x, expected: %x", m2.State, M2)}
 	}
-	if m2.PublicKey == nil || m2.EncryptedData == nil || m2.Error != 0x00 {
-		return &PairVerifyError{"M2", TlvErrorFromCode(m2.Error)}
+	if err := pairingError(m2); err != nil {
+		return &PairVerifyError{"M2", err}
+	}
+	if m2.PublicKey == nil || m2.EncryptedData == nil {
+		return &PairVerifyError{"M2", errors.New("no public key or encrypted data")}
 	}
 	if len(m2.PublicKey) != 32 {
 		return &PairVerifyError{"M2", errors.New("wrong remote localPublic key length")}
@@ -193,8 +196,11 @@ func (d *Device) PairVerify() error {
 		return &PairVerifyError{"M4", err}
 	}
 
-	if m4.Error != 0x00 {
-		return &PairVerifyError{"M4", TlvErrorFromCode(m4.Error)}
+	if err := pairingError(m4); err != nil {
+		return &PairVerifyError{"M4", err}
+	}
+	if m4.State != M4 {
+		return &PairVerifyError{"M4", fmt.Errorf("unexpected state %x, expected: %x", m4.State, M4)}
 	}
 
 	ss, err := newControllerSession(sharedKey, d)

@@ -22,7 +22,7 @@ type pairSetupPayload struct {
 	EncryptedData []byte `tlv8:"5"`
 	State         byte   `tlv8:"6"`
 	Error         byte   `tlv8:"7"`
-	RetryDelay    byte   `tlv8:"8"`
+	RetryDelay    uint16 `tlv8:"8"` // seconds
 	Certificate   []byte `tlv8:"9"`
 	Signature     []byte `tlv8:"10"`
 	Permissions   byte   `tlv8:"11"`
@@ -35,7 +35,7 @@ type Controller struct {
 	uuid            string
 	mu              sync.Mutex
 	cancelDiscovery context.CancelFunc
-	devices         map[string]*Device
+	devices         map[string]*Device // by accessory id, see deviceKey
 
 	st *storer
 
@@ -77,10 +77,47 @@ func NewController(store Store, name string) (*Controller, error) {
 	}, nil
 }
 
+// namePrefix marks key of accessory that doesn't advertise its id.
+const namePrefix = "name:"
+
+// deviceKey identifies accessory by pairing id from txt record,
+// since name may change, e.g. after rename or mdns name conflict.
+func deviceKey(e dnssd.BrowseEntry) string {
+	if id := e.Text["id"]; id != "" {
+		return strings.ToUpper(id)
+	}
+	return namePrefix + e.Name
+}
+
+// findDevice returns device of mdns entry and its key. Must be called with c.mu held.
+func (c *Controller) findDevice(e dnssd.BrowseEntry) (*Device, string) {
+	key := deviceKey(e)
+	if dd, ok := c.devices[key]; ok {
+		return dd, key
+	}
+	if strings.HasPrefix(key, namePrefix) {
+		// no id, so only name can tell
+		for _, dd := range c.devices {
+			if dd.Name == e.Name {
+				return dd, dd.id
+			}
+		}
+	}
+	return nil, key
+}
+
 func (c *Controller) putDevice(dd *Device) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.devices[dd.Name] = dd
+	c.devices[dd.id] = dd
+}
+
+func (c *Controller) deleteDevice(dd *Device) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.devices[dd.id] == dd {
+		delete(c.devices, dd.id)
+	}
 }
 
 // onPaired is called by device after successful /pair-setup.
@@ -104,57 +141,69 @@ func (c *Controller) onUnpaired(dd *Device) {
 	// if not paired and not discovered,
 	// then it should not present anymore
 	if !dd.IsDiscovered() {
-		c.mu.Lock()
-		delete(c.devices, dd.Name)
-		c.mu.Unlock()
+		c.deleteDevice(dd)
 	}
 }
 
 // onLost is called when device is no longer advertised via mdns.
+// Connection of paired device is kept, mdns may miss announcements
+// while accessory is still reachable. If it is not, connection breaks by itself.
 func (c *Controller) onLost(dd *Device) {
 	// if lost and not paired,
 	// then it should not present anymore
 	if !dd.IsPaired() {
-		c.mu.Lock()
-		delete(c.devices, dd.Name)
-		c.mu.Unlock()
+		dd.close(errors.New("device lost from mdns"))
+		c.deleteDevice(dd)
 	}
 }
 
 // onDnssdAdd stores mdns entry. Returns device and true if device is newly discovered.
 func (c *Controller) onDnssdAdd(e dnssd.BrowseEntry) (*Device, bool) {
 	c.mu.Lock()
-	dd, ok := c.devices[e.Name]
-	if !ok {
+	dd, key := c.findDevice(e)
+	if dd == nil {
 		// not exist - init one
 		dd = newDevice(e.Name, c, c.name, c.localLTKP, c.localLTSK)
-		c.devices[e.Name] = dd
+		dd.id = key
+		c.devices[key] = dd
 	}
 	c.mu.Unlock()
 
-	return dd, dd.addDnssdEntry(e)
+	discovered, configChanged := dd.addDnssdEntry(e)
+	if configChanged {
+		go dd.refreshAccessories()
+	}
+	return dd, discovered
 }
 
 // onDnssdRemove forgets mdns entry. Device is lost only when it is not
 // advertised on any interface anymore, then it returns device and true.
 func (c *Controller) onDnssdRemove(e dnssd.BrowseEntry) (*Device, bool) {
-	dd := c.getDevice(e.Name)
+	c.mu.Lock()
+	dd, _ := c.findDevice(e)
+	c.mu.Unlock()
 	if dd == nil || !dd.removeDnssdEntry(e) {
 		return dd, false
 	}
-	dd.close(errors.New("device lost from mdns"))
 	c.onLost(dd)
 	return dd, true
 }
 
-func (c *Controller) getDevice(id string) *Device {
+// getDevice returns device by name.
+func (c *Controller) getDevice(name string) *Device {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	dd, ok := c.devices[id]
-	if !ok {
-		return nil
+	var res *Device
+	for _, dd := range c.devices {
+		if dd.Name != name {
+			continue
+		}
+		// same name may belong to another accessory, e.g. paired one is offline
+		if res == nil || dd.IsDiscovered() {
+			res = dd
+		}
 	}
-	return dd
+	return res
 }
 
 // StartDiscoveryWithContext browses for HomeKit accessories until ctx is done
@@ -340,6 +389,7 @@ func (c *Controller) LoadPairings() error {
 			}
 		}
 		dd := newDevice(p.Name, c, c.name, c.localLTKP, c.localLTSK)
+		dd.id = strings.ToUpper(p.Id)
 		dd.setPairing(p, true)
 
 		c.putDevice(dd)

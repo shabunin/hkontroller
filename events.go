@@ -58,18 +58,7 @@ func (d *Device) onEvent(res *http.Response) {
 		val := ch.Value
 
 		// update values, so it will be available without extra GetAccessories request
-		for _, aa := range d.Accessories() {
-			if aa.Id != aid {
-				continue
-			}
-			for _, ss := range aa.Ss {
-				for _, cc := range ss.Cs {
-					if cc.Iid == iid {
-						cc.Value = val
-					}
-				}
-			}
-		}
+		d.setValue(aid, iid, val)
 
 		d.dispatch(CharacteristicUpdate{Aid: aid, Iid: iid, Value: val})
 	}
