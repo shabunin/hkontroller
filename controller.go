@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/shabunin/dnssd"
 	_ "github.com/shabunin/dnssd/log"
@@ -147,43 +148,117 @@ func (c *Controller) getDevice(id string) *Device {
 	return dd
 }
 
+// StartDiscoveryWithContext browses for HomeKit accessories until ctx is done
+// or StopDiscovery is called. Devices are sent to the first channel when they
+// are discovered and to the second one when they are lost.
+// Discovery never waits for channels to be read, devices are queued in order.
+// Both channels are closed when discovery stops, devices not yet read are dropped.
 func (c *Controller) StartDiscoveryWithContext(ctx context.Context) (<-chan *Device, <-chan *Device) {
 
-	discoverCh := make(chan *Device)
-	lostCh := make(chan *Device)
+	discovered := newDeviceQueue()
+	lost := newDeviceQueue()
 
 	// entries come per network interface,
 	// so device is sent to channels only when its state changes
 	addFn := func(e dnssd.BrowseEntry) {
-		if dd, discovered := c.onDnssdAdd(e); discovered {
-			discoverCh <- dd
+		if dd, ok := c.onDnssdAdd(e); ok {
+			discovered.push(dd)
 		}
 	}
 
 	rmvFn := func(e dnssd.BrowseEntry) {
-		if dd, lost := c.onDnssdRemove(e); lost {
-			lostCh <- dd
+		if dd, ok := c.onDnssdRemove(e); ok {
+			lost.push(dd)
 		}
 	}
 
+	// set before goroutine starts, so StopDiscovery works right after this call
+	ctx, cancel := context.WithCancel(ctx)
+	c.mu.Lock()
+	c.cancelDiscovery = cancel
+	c.mu.Unlock()
+
+	stopped, stop := context.WithCancel(context.Background())
+	discoverCh := discovered.forward(stopped)
+	lostCh := lost.forward(stopped)
+
 	go func() {
-		defer func() {
-			close(discoverCh)
-			close(lostCh)
-		}()
+		defer stop()
+		defer cancel()
 		for {
-			newCtx, cancel := context.WithCancel(ctx)
-			c.mu.Lock()
-			c.cancelDiscovery = cancel
-			c.mu.Unlock()
-			err := dnssd.LookupType(newCtx, "_hap._tcp.local.", addFn, rmvFn)
-			cancel()
-			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+			err := lookupType(ctx, "_hap._tcp.local.", addFn, rmvFn)
+			if ctx.Err() != nil {
+				return
+			}
+			// e.g. no network interfaces yet, don't spin
+			log.Debug.Println("discovery error: ", err)
+			select {
+			case <-time.After(discoveryRetryDelay):
+			case <-ctx.Done():
 				return
 			}
 		}
 	}()
 	return discoverCh, lostCh
+}
+
+// deviceQueue passes devices to channel without blocking the sender.
+type deviceQueue struct {
+	mu     sync.Mutex
+	items  []*Device
+	notify chan struct{}
+}
+
+func newDeviceQueue() *deviceQueue {
+	return &deviceQueue{notify: make(chan struct{}, 1)}
+}
+
+func (q *deviceQueue) push(d *Device) {
+	q.mu.Lock()
+	q.items = append(q.items, d)
+	q.mu.Unlock()
+	select {
+	case q.notify <- struct{}{}:
+	default:
+	}
+}
+
+func (q *deviceQueue) pop() (*Device, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.items) == 0 {
+		return nil, false
+	}
+	d := q.items[0]
+	q.items[0] = nil
+	q.items = q.items[1:]
+	return d, true
+}
+
+// forward sends queued devices to returned channel in order,
+// until ctx is done, then closes the channel.
+func (q *deviceQueue) forward(ctx context.Context) <-chan *Device {
+	out := make(chan *Device)
+	go func() {
+		defer close(out)
+		for {
+			d, ok := q.pop()
+			if !ok {
+				select {
+				case <-q.notify:
+					continue
+				case <-ctx.Done():
+					return
+				}
+			}
+			select {
+			case out <- d:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out
 }
 
 func (c *Controller) StartDiscovery() (<-chan *Device, <-chan *Device) {
@@ -267,3 +342,9 @@ func (c *Controller) LoadPairings() error {
 func (c *Controller) GetDevice(deviceName string) *Device {
 	return c.getDevice(deviceName)
 }
+
+// lookupType is replaced in tests
+var lookupType = dnssd.LookupType
+
+// discoveryRetryDelay is a pause before lookup is restarted after error
+var discoveryRetryDelay = time.Second
