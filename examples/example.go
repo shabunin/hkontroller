@@ -279,8 +279,11 @@ func (l *cli) initCommands() {
 		{"forget", "", "forget pairing without asking accessory, e.g. after reset", true, l.cmdForget},
 		{"pairings", "", "list controllers paired with accessory", true, l.cmdPairings},
 		{"accessories", "", "load and show accessories", true, l.cmdAccessories},
-		{"get", "<aid> <iid>", "read characteristic", true, l.cmdGet},
-		{"put", "<aid> <iid> <value>", "write characteristic: true, false, number or text", true, l.cmdPut},
+		{"identify", "", "ask accessory to identify itself, e.g. blink", true, l.cmdIdentify},
+		{"get", "<aid> <iid> [<aid> <iid>...]", "read characteristics", true, l.cmdGet},
+		{"put", "[-r | -t <ttl>] <aid> <iid> <value>",
+			"write characteristic: true, false, number or text;\n" +
+				"-r returns write response, -t is timed write, e.g. -t 2s", true, l.cmdPut},
 		{"watch", "<aid> <iid> | <aid> | all", "subscribe to events", true, l.cmdWatch},
 		{"unwatch", "<aid> <iid> | <aid> | all", "unsubscribe from events", true, l.cmdUnwatch},
 		{"quit", "", "exit, Ctrl-C and Ctrl-D work too", false, func([]string) error { l.quit(); return nil }},
@@ -293,7 +296,12 @@ func (l *cli) cmdHelp([]string) error {
 		if c.args != "" {
 			usage += " " + c.args
 		}
-		l.printf("  %-36s %s\n", usage, c.help)
+		for i, line := range strings.Split(c.help, "\n") {
+			if i > 0 {
+				usage = ""
+			}
+			l.printf("  %-40s %s\n", usage, line)
+		}
 	}
 	return nil
 }
@@ -455,16 +463,38 @@ func parseIds(args []string) (uint64, uint64, error) {
 	return aid, iid, nil
 }
 
+func (l *cli) cmdIdentify([]string) error {
+	if err := l.selected().Identify(); err != nil {
+		return err
+	}
+	l.printf("identify sent\n")
+	return nil
+}
+
 func (l *cli) cmdGet(args []string) error {
-	aid, iid, err := parseIds(args)
-	if err != nil {
+	if len(args) == 0 || len(args)%2 != 0 {
+		return errors.New("usage: get <aid> <iid> [<aid> <iid>...]")
+	}
+	var ids []hkontroller.CharacteristicId
+	for i := 0; i < len(args); i += 2 {
+		aid, iid, err := parseIds(args[i:])
+		if err != nil {
+			return err
+		}
+		ids = append(ids, hkontroller.CharacteristicId{Aid: aid, Iid: iid})
+	}
+	res, err := l.selected().GetCharacteristics(ids...)
+	var cerr *hkontroller.CharacteristicError
+	if err != nil && !errors.As(err, &cerr) {
 		return err
 	}
-	c, err := l.selected().GetCharacteristic(aid, iid)
-	if err != nil {
-		return err
+	for _, c := range res {
+		if c.Status != nil && *c.Status != hkontroller.JsonStatusSuccess {
+			l.printf("%d.%d: %v\n", c.Aid, c.Iid, &hkontroller.CharacteristicError{Aid: c.Aid, Iid: c.Iid, Status: *c.Status})
+			continue
+		}
+		l.printf("%d.%d = %v\n", c.Aid, c.Iid, c.Value)
 	}
-	l.printf("%d.%d = %v\n", aid, iid, c.Value)
 	return nil
 }
 
@@ -488,12 +518,40 @@ func parseValue(args []string) interface{} {
 }
 
 func (l *cli) cmdPut(args []string) error {
+	usage := errors.New("usage: put [-r | -t <ttl>] <aid> <iid> <value>")
+	withResponse := false
+	var ttl time.Duration
+	switch {
+	case len(args) > 0 && args[0] == "-r":
+		withResponse = true
+		args = args[1:]
+	case len(args) > 1 && args[0] == "-t":
+		var err error
+		if ttl, err = time.ParseDuration(args[1]); err != nil || ttl <= 0 {
+			return fmt.Errorf("ttl: %q, e.g. 2s or 500ms", args[1])
+		}
+		args = args[2:]
+	}
 	aid, iid, err := parseIds(args)
 	if err != nil || len(args) < 3 {
-		return errors.New("usage: put <aid> <iid> <value>")
+		return usage
 	}
 	value := parseValue(args[2:])
-	if err := l.selected().PutCharacteristic(aid, iid, value); err != nil {
+	d := l.selected()
+	switch {
+	case withResponse:
+		res, err := d.PutCharacteristicWithResponse(aid, iid, value)
+		if err != nil {
+			return err
+		}
+		l.printf("%d.%d = %v, response: %v\n", aid, iid, value, res)
+		return nil
+	case ttl > 0:
+		err = d.PutCharacteristicTimed(aid, iid, value, ttl)
+	default:
+		err = d.PutCharacteristic(aid, iid, value)
+	}
+	if err != nil {
 		return err
 	}
 	l.printf("%d.%d = %v\n", aid, iid, value)
