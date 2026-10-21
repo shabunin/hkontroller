@@ -1,175 +1,144 @@
-## command line HomeKit controller
+# command line HomeKit controller
 
-this exampe is CLI for Controller.
-
-## accessories
-
-One can use `homebridge` with `homebridge-dummy` plugin.
-
-```text
-sudo npm i -g homebridge
-sudo npm i -g homebridge-dummy
-sudo npm i -g homebridge-dummy-thermostat
-sudo npm -g i homebridge-fake-light-bulb
+```sh
+go run ./examples
 ```
 
-My `~/.homebridge/config.json`:
+Flags:
+
+- `-store ./.store` directory for controller keys and pairings
+- `-name hkontrol` controller name, accessories use it as controller id
+- `-debug` print debug log
+
+It discovers accessories, connects to paired ones and reconnects when connection is lost.
+Commands complete with Tab, history is under arrow keys, Ctrl-C or Ctrl-D quit.
+
+```text
+> help
+  help                                     show commands
+  devices                                  list devices
+  use [no|name|id]                         select device, without argument unselect
+  pair <pin>                               pair device, e.g. pair 031-45-154
+  verify                                   establish encrypted session again
+  unpair                                   remove pairing from accessory and forget it
+  forget                                   forget pairing without asking accessory, e.g. after reset
+  pairings                                 list controllers paired with accessory
+  accessories                              load and show accessories
+  identify                                 ask accessory to identify itself, e.g. blink
+  get <aid> <iid> [<aid> <iid>...]         read characteristics
+  put [-r | -t <ttl>] <aid> <iid> <value>  write characteristic: true, false, number or text;
+                                           -r returns write response, -t is timed write, e.g. -t 2s
+  watch <aid> <iid> | <aid> | all          subscribe to events
+  unwatch <aid> <iid> | <aid> | all        unsubscribe from events
+  quit                                     exit, Ctrl-C and Ctrl-D work too
+```
+
+## accessories to try
+
+[Homebridge](https://homebridge.io) with
+[homebridge-dummy](https://github.com/mpatfield/homebridge-dummy) plugin
+makes accessories that don't control anything:
+
+```sh
+mkdir hb && cd hb
+npm install homebridge homebridge-dummy
+./node_modules/.bin/homebridge -U ./storage -P ./node_modules
+```
+
+`storage/config.json`:
 
 ```json
 {
   "bridge": {
-    "name": "homebridge",
-    "username": "CC:22:3D:E3:CE:30",
-    "manufacturer": "homebridge.io",
-    "model": "homebridge",
+    "name": "Hk Fake Bridge",
+    "username": "0E:AA:BB:CC:DD:05",
     "port": 51827,
     "pin": "031-45-154"
   },
-
-  "description": "",
-  "ports": {
-    "start": 52100,
-    "end": 52150,
-    "comment": "ports to listen."
-  },
-  "accessories": [
+  "platforms": [
     {
-      "accessory": "DummySwitch",
-      "name": "switch_1"
-    },
-    {
-      "accessory": "DummySwitch",
-      "name": "switch_2"
-    },
-    {
-      "accessory": "DummySwitch",
-      "name": "switch_3",
-      "time": 18000,
-      "random": true
-    },
-    {
-      "accessory": "Thermostat",
-      "name": "Thermostat"
-    },
-    {
-      "name": "Simple Light",
-      "brightness": false,
-      "color": "none",
-      "accessory": "homebridge-fake-light-bulb"
-    },
-    {
-      "name": "Dimmer",
-      "brightness": true,
-      "color": "none",
-      "accessory": "homebridge-fake-light-bulb"
-    },
-    {
-      "name": "RGB",
-      "brightness": true,
-      "color": "hue",
-      "accessory": "homebridge-fake-light-bulb"
-    },
-    {
-      "name": "Light w temp",
-      "brightness": true,
-      "color": "colorTemperature",
-      "accessory": "homebridge-fake-light-bulb"
+      "platform": "HomebridgeDummy",
+      "accessories": [
+        {
+          "id": "blinker",
+          "name": "Blinker",
+          "type": "Switch",
+          "schedule": { "type": "INTERVAL", "time": 5, "units": "SECONDS" },
+          "autoReset": { "type": "TIMEOUT", "time": 2, "units": "SECONDS" }
+        },
+        { "id": "switch", "name": "Plain Switch", "type": "Switch" },
+        { "id": "lamp", "name": "Lamp", "type": "Lightbulb", "isDimmer": true }
+      ]
     }
   ]
 }
 ```
 
-## this example
+Blinker turns on every 5 seconds and off after 2, so it sends events.
+To pair the bridge again after its pairing was lost, delete `storage/persist`
+and restart Homebridge.
 
-```text
-$ go run examples/example.go
-> help
-commands: help
-          devices
-          use <device>
-if device selected:
-          pair <pin>
-          unpair
-          accessories
-          get <aid> <iid>
-          put <aid> <iid> <type:number/bool> <value>
-          watch <aid> <iid>
-          unwatch <aid> <iid>
-          quit
+## session
 
-```
-
-One should use `devices` command to get list of discovered or previously paired devices.
-
-Let, for example, controlled device have id `CC:22:3D:E3:CE:30`. If it is online and advertising itself, running `devices` command produce output:
+Select device by number from `devices`, by name or by id, then pair:
 
 ```text
 > devices
-ID	FriendlyName	DNSSD	Paired	Verified
-CC:22:3D:E3:CE:30	homebridge\ CAD8	discovered	---	---
+  no  id                 discovered  paired  verified  name
+  0   0E:AA:BB:CC:DD:05  yes         -       -         Hk Fake Bridge 391F
+> use 0
+Hk Fake Bridge 391F> pair 031-45-154
+paired, connecting
+Hk Fake Bridge 391F: connected
 ```
 
-Then, put `use CC:22:3D:E3:CE:30` command to select that device.
-After that - pair:
+`accessories` shows accessory ids (`#2`) and characteristic ids (`10`):
 
 ```text
-> use CC:22:3D:E3:CE:30
-selected device:  CC:22:3D:E3:CE:30 	 homebridge\ CAD8
-CC:22:3D:E3:CE:30> pair 031-45-154
-pair-setup error:  m2err = 6
+Hk Fake Bridge 391F> accessories
+#2 Blinker
+  ├─ AccessoryInfo
+  │  ├─ 2   Identify = <nil>  [pw]
+  │  ├─ 3   Manufacturer = Homebridge  [pr]
+  │  ...
+  └─ Switch
+     ├─ 9   Name = Blinker  [pr]
+     └─ 10  On = 0  [ev pr pw]
+...
 ```
 
-In my case homebridge instance is already paired, so I do `rm -rf ~/.homebridge/persist` and restart homebridge. After that:
+Read and write values, several at once too:
 
 ```text
-CC:22:3D:E3:CE:30> pair 031-45-154
-device paired
-establishing encrypted session
-CC:22:3D:E3:CE:30> should be connected now
-> 
+Hk Fake Bridge 391F> put 4 11 37
+4.11 = 37
+Hk Fake Bridge 391F> get 4 10 4 11
+4.10 = 0
+4.11 = 37
 ```
 
-Example of commands:
+Watch events. Watched events are subscribed again after reconnect:
 
 ```text
-CC:22:3D:E3:CE:30> accessories
-
-# 1 homebridge CAD8
-    │
-    ├─service:  AccessoryInfo
-    │  ├─ characteristic # 2 	[ Identify ] =  <nil>
-    │  ├─ characteristic # 3 	[ Manufacturer ] =  homebridge.io
-    │  ├─ characteristic # 4 	[ Model ] =  homebridge
-    │  ├─ characteristic # 5 	[ Name ] =  homebridge CAD8
-    │  ├─ characteristic # 6 	[ SerialNumber ] =  CC:22:3D:E3:CE:30
-    │  └─ characteristic # 7 	[ FirmwareRevision ] =  1.5.0
-    │
-    └─service:  HapProtocolInfo
-       └─ characteristic # 9 	[ Version ] =  1.1.0
-
-# 2 switch_1
-    │
-    ├─service:  AccessoryInfo
-    │  ├─ characteristic # 2 	[ Identify ] =  <nil>
-    │  ├─ characteristic # 3 	[ Manufacturer ] =  Homebridge
-    │  ├─ characteristic # 4 	[ Model ] =  Dummy Switch
-    │  ├─ characteristic # 5 	[ Name ] =  switch_1
-    │  ├─ characteristic # 6 	[ SerialNumber ] =  Dummy-switch_1
-    │  └─ characteristic # 7 	[ FirmwareRevision ] =  0.7.0
-    │
-    └─service:  Switch
-       ├─ characteristic # 9 	[ Name ] =  switch_1
-       └─ characteristic # 10 	[ On ] =  0
-....
-....
+Hk Fake Bridge 391F> watch 2 10
+watching
+event Hk Fake Bridge 391F 2.10 = 1
+event Hk Fake Bridge 391F 2.10 = 0
+Hk Fake Bridge 391F> unwatch 2 10
+stopped watching
 ```
 
-To turn on `switch_1` run `put` command with aid=2(accessory id) and iid=10(characteristic id):
+Characteristics with `tw` permission, e.g. some locks, need timed write,
+the ones with `wr` return a value when written:
 
 ```text
-CC:22:3D:E3:CE:30> put 2 10 bool true
-CC:22:3D:E3:CE:30> put 2 10 number 1
+> put 2 11 5
+put: characteristic 2.11 error -70410: invalid value in request
+> put -t 2s 2 11 7
+2.11 = 7
+> put -r 2 12 hello
+2.12 = hello, response: echo:hello
 ```
 
-Note: keep in mind that homebridge-dummy automatically turn it off after short amount of time.
-
+`unpair` removes pairing from accessory, `forget` only forgets it,
+e.g. when accessory was reset.
