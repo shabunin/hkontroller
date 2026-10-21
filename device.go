@@ -43,6 +43,10 @@ type Device struct {
 	controllerLTPK []byte
 	controllerLTSK []byte
 
+	// pairMu serializes PairSetup and PairVerify,
+	// so they never open connections concurrently
+	pairMu sync.Mutex
+
 	// mu guards discovery, pairing and connection state below
 	mu sync.Mutex
 
@@ -359,15 +363,20 @@ func (d *Device) connect() error {
 }
 
 // setVerified switches connection to encrypted session and starts background read.
-func (d *Device) setVerified(ss *session) {
+// It fails if cc was closed meanwhile, e.g. device was lost during pair-verify.
+func (d *Device) setVerified(cc *conn, ss *session) error {
 	d.mu.Lock()
-	cc := d.cc
+	if d.cc != cc || cc.isClosed() {
+		d.mu.Unlock()
+		return errConnClosed
+	}
 	d.ss = ss
 	d.verified = true
 	d.mu.Unlock()
 
 	cc.UpgradeEnc(ss)
 	d.startBackgroundRead(cc)
+	return nil
 }
 
 // startBackgroundRead reads responses and events from cc
@@ -539,17 +548,39 @@ func (d *Device) PutCharacteristic(aid uint64, cid uint64, val interface{}) erro
 	if err != nil {
 		return err
 	}
-	_ = res
+	return putResult(res)
+}
 
-	//all, err := io.ReadAll(res.Body)
-	//if err != nil {
-	//	return err
-	//}
-	//
-	// TODO: extract errors. if response message is empty then no error occured
-	// 		 case of error:
-	//        {"characteristics":[{"aid":1,"iid":12,"status":-70402}]}
-	// fmt.Println(string(all))
+// putResult returns error of PUT /characteristics response.
+// On success accessory answers 204 No Content, otherwise it lists status
+// of every characteristic, e.g. {"characteristics":[{"aid":1,"iid":12,"status":-70402}]}
+func putResult(res *http.Response) error {
+	if res.StatusCode == http.StatusNoContent {
+		return nil
+	}
 
+	all, err := io.ReadAll(res.Body)
+	if err != nil {
+		return err
+	}
+
+	var payload struct {
+		Characteristics []CharacteristicDescription `json:"characteristics"`
+		Status          *int                        `json:"status"`
+	}
+	if err := json.Unmarshal(all, &payload); err != nil {
+		return fmt.Errorf("unexpected response %d: %q", res.StatusCode, all)
+	}
+	for _, c := range payload.Characteristics {
+		if c.Status != nil && *c.Status != JsonStatusSuccess {
+			return &CharacteristicError{Aid: c.Aid, Iid: c.Iid, Status: *c.Status}
+		}
+	}
+	if payload.Status != nil && *payload.Status != JsonStatusSuccess {
+		return fmt.Errorf("unexpected response %d: %s", res.StatusCode, jsonStatusMessage(*payload.Status))
+	}
+	if res.StatusCode != http.StatusMultiStatus && res.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected response %d", res.StatusCode)
+	}
 	return nil
 }

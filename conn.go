@@ -311,11 +311,13 @@ func (c *conn) loop() {
 
 			continue
 		} else {
+			// after malformed response position in stream is unknown,
+			// following responses can't be trusted, so loop stops and connection is closed
 			res, err := http.ReadResponse(rd, nil)
 			if err != nil {
 				log.Debug.Println("response error: ", err)
 				c.deliver(nil, err)
-				continue
+				return
 			}
 
 			// ReadAll here because if response is chunked then on next loop there will be error
@@ -324,7 +326,7 @@ func (c *conn) loop() {
 			if err != nil {
 				log.Debug.Println("response body read error: ", err)
 				c.deliver(nil, err)
-				continue
+				return
 			}
 
 			// then assign new res.Body

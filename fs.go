@@ -4,8 +4,10 @@ import (
 	"github.com/shabunin/hkontroller/log"
 
 	"bytes"
+	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -105,9 +107,28 @@ func (st *storer) KeyPair() (KeyPair, error) {
 		return kp, err
 	}
 
-	err = json.Unmarshal(b, &kp)
+	if err := json.Unmarshal(b, &kp); err != nil {
+		return kp, err
+	}
+	if len(kp.Public) != ed25519.PublicKeySize || len(kp.Private) != ed25519.PrivateKeySize {
+		return kp, errors.New("invalid keypair")
+	}
 
-	return kp, err
+	return kp, nil
+}
+
+// hasKey reports if value for key is stored.
+func (st *storer) hasKey(key string) (bool, error) {
+	keys, err := st.KeysWithSuffix(key)
+	if err != nil {
+		return false, err
+	}
+	for _, k := range keys {
+		if k == key {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (st *storer) SaveKeyPair(kp KeyPair) error {

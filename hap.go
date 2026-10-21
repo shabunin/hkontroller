@@ -13,6 +13,7 @@ const (
 	JsonStatusOperationTimedOut           = -70408
 	JsonStatusResourceDoesNotExist        = -70409
 	JsonStatusInvalidValueInRequest       = -70410
+	JsonStatusInsufficientAuthorization   = -70411
 )
 
 const (
