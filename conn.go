@@ -229,31 +229,38 @@ func (c *conn) UpgradeEnc(s *session) {
 	c.smu.Unlock()
 }
 
+func (c *conn) session() *session {
+	c.smu.Lock()
+	defer c.smu.Unlock()
+	return c.ss
+}
+
 // Write writes bytes to the connection.
 // The written bytes are encrypted when possible.
 func (c *conn) Write(b []byte) (int, error) {
-	if c.ss == nil {
+	ss := c.session()
+	if ss == nil {
 		n, err := c.Conn.Write(b)
 		if err != nil {
 			c.close()
-			return n, err
 		}
 		return n, err
 	}
 
-	var buf bytes.Buffer
-	buf.Write(b)
-	enc, err := c.ss.Encrypt(&buf)
-
+	enc, err := ss.Encrypt(bytes.NewReader(b))
 	if err != nil {
 		c.close()
 		return 0, err
 	}
 
-	encB, err := io.ReadAll(enc)
-	n, err := c.Conn.Write(encB)
+	// counter is already advanced, so packets not written
+	// would make accessory fail to decrypt everything after them
+	if _, err := io.Copy(c.Conn, enc); err != nil {
+		c.close()
+		return 0, err
+	}
 
-	return n, err
+	return len(b), nil
 }
 
 const (
@@ -263,7 +270,8 @@ const (
 // Read reads bytes from the connection.
 // The read bytes are decrypted when possible.
 func (c *conn) Read(b []byte) (int, error) {
-	if c.ss == nil {
+	ss := c.session()
+	if ss == nil {
 		n, err := c.Conn.Read(b)
 		if err != nil {
 			c.close()
@@ -276,7 +284,7 @@ func (c *conn) Read(b []byte) (int, error) {
 	}
 	// empty buffer would return io.EOF, so next packet is read instead
 	for c.readBuf == nil || c.readBuf.Len() == 0 {
-		buf, err := c.ss.Decrypt(c.bufReader)
+		buf, err := ss.Decrypt(c.bufReader)
 		if err != nil {
 			c.close()
 			return 0, err

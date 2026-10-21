@@ -996,3 +996,74 @@ func TestPairRemoveResponse(t *testing.T) {
 		}
 	}
 }
+
+// shortWriteConn accepts only limit bytes, then fails.
+type shortWriteConn struct {
+	net.Conn
+	limit int
+}
+
+func (c *shortWriteConn) Write(b []byte) (int, error) {
+	if len(b) > c.limit {
+		return c.limit, errors.New("short write")
+	}
+	return len(b), nil
+}
+
+func (c *shortWriteConn) Close() error { return nil }
+
+func testSessions() (client, server *session) {
+	client = &session{}
+	copy(client.encryptKey[:], bytes.Repeat([]byte{1}, 32))
+	copy(client.decryptKey[:], bytes.Repeat([]byte{2}, 32))
+	return client, &session{encryptKey: client.decryptKey, decryptKey: client.encryptKey}
+}
+
+func TestEncryptedWriteReturnsPlainLength(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+	css, sss := testSessions()
+	cc := newConn(client)
+	cc.UpgradeEnc(css)
+	sc := newConn(server)
+	sc.UpgradeEnc(sss)
+
+	msg := bytes.Repeat([]byte("x"), 3000) // several packets
+	errc := make(chan error, 1)
+	go func() {
+		n, err := cc.Write(msg)
+		if err == nil && n != len(msg) {
+			err = fmt.Errorf("written %d bytes, want %d", n, len(msg))
+		}
+		errc <- err
+	}()
+
+	got := make([]byte, len(msg))
+	if _, err := io.ReadFull(sc, got); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, msg) {
+		t.Fatal("decrypted data differs")
+	}
+	if err := <-errc; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEncryptedShortWriteClosesConn(t *testing.T) {
+	css, _ := testSessions()
+	cc := newConn(&shortWriteConn{limit: 10})
+	cc.UpgradeEnc(css)
+
+	n, err := cc.Write([]byte("GET /accessories HTTP/1.1\r\n\r\n"))
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if n != 0 {
+		t.Fatalf("n = %d, want 0", n)
+	}
+	if !cc.isClosed() {
+		t.Fatal("connection with broken encryption counter is not closed")
+	}
+}
