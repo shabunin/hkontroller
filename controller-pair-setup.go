@@ -295,6 +295,7 @@ func (d *Device) PairSetup(pin string) error {
 	d.mu.Lock()
 	d.paired = true
 	d.verified = false
+	d.notifyStateChanged()
 	d.mu.Unlock()
 	if d.ctrl != nil {
 		d.ctrl.onPaired(d)

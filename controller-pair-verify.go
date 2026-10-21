@@ -30,7 +30,24 @@ type pairVerifyM3EncPayload struct {
 func (d *Device) PairVerify() error {
 	d.pairMu.Lock()
 	defer d.pairMu.Unlock()
+	return verifyDevice(d)
+}
 
+// verifyIfNeeded verifies device unless it is verified already, e.g. by PairVerify meanwhile.
+func (d *Device) verifyIfNeeded() error {
+	d.pairMu.Lock()
+	defer d.pairMu.Unlock()
+	if d.IsVerified() {
+		return nil
+	}
+	return verifyDevice(d)
+}
+
+// verifyDevice is replaced in tests
+var verifyDevice = (*Device).pairVerify
+
+// pairVerify must be called with d.pairMu held.
+func (d *Device) pairVerify() error {
 	if !d.IsPaired() {
 		return errors.New("pair device before verifying")
 	}
