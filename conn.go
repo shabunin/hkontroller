@@ -148,10 +148,12 @@ type conn struct {
 
 	done chan struct{} // closed by device when connection is closed
 
-	// pending receives response for the request in flight, nil if nobody waits.
-	// It is buffered, so loop never blocks even if requester is gone.
+	// waiting holds response channels of sent requests, in order.
+	// Accessory answers requests in the same order and responses have no ids,
+	// so late response of timed out request is matched to its own request.
+	// Channels are buffered, so loop never blocks even if requester is gone.
 	pmu     sync.Mutex
-	pending chan responseResult
+	waiting []chan responseResult
 }
 
 type responseResult struct {
@@ -193,22 +195,28 @@ func (c *conn) loopStopped() <-chan struct{} {
 	return c.backgroundStop
 }
 
-// expectResponse registers ch to receive response read by loop.
-func (c *conn) expectResponse(ch chan responseResult) {
+// expectResponse returns channel receiving response to the next request sent.
+func (c *conn) expectResponse() chan responseResult {
+	ch := make(chan responseResult, 1)
 	c.pmu.Lock()
-	c.pending = ch
+	c.waiting = append(c.waiting, ch)
 	c.pmu.Unlock()
+	return ch
 }
 
-// deliver passes response to waiting request, if any.
+// deliver passes response to the oldest waiting request.
 func (c *conn) deliver(res *http.Response, err error) {
 	c.pmu.Lock()
-	ch := c.pending
-	c.pending = nil
-	c.pmu.Unlock()
-	if ch != nil {
-		ch <- responseResult{res, err}
+	if len(c.waiting) == 0 {
+		c.pmu.Unlock()
+		log.Debug.Println("response without request: ", err)
+		return
 	}
+	ch := c.waiting[0]
+	c.waiting[0] = nil
+	c.waiting = c.waiting[1:]
+	c.pmu.Unlock()
+	ch <- responseResult{res, err}
 }
 
 func (c *conn) SetEventCallback(cb func(*http.Response)) {

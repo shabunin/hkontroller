@@ -399,3 +399,97 @@ func TestDoneWithoutConnection(t *testing.T) {
 	d := newDevice("test", nil, "ctrl", nil, nil)
 	waitDone(t, d.Done())
 }
+
+func characteristicResponse(aid, iid uint64, value interface{}) string {
+	return jsonResponse(fmt.Sprintf(`{"characteristics":[{"aid":%d,"iid":%d,"value":%v}]}`, aid, iid, value))
+}
+
+func getWithTimeout(d *Device, ep string, timeout time.Duration) (*http.Response, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "GET", ep, nil)
+	return d.doRequest(req)
+}
+
+func TestLateResponseGoesToItsRequest(t *testing.T) {
+	d, _ := newTestDevice(t, func(req *http.Request, _ string) string {
+		switch req.URL.Query().Get("id") {
+		case "1.2":
+			time.Sleep(200 * time.Millisecond) // slow accessory
+			return characteristicResponse(1, 2, 111)
+		case "1.3":
+			return characteristicResponse(1, 3, 222)
+		}
+		return noContent(req, "")
+	})
+
+	if _, err := getWithTimeout(d, "/characteristics?id=1.2", 50*time.Millisecond); err == nil {
+		t.Fatal("expected timeout")
+	}
+
+	// late response of 1.2 must not be taken as response of 1.3
+	for i := 0; i < 3; i++ {
+		c, err := d.GetCharacteristic(1, 3)
+		if err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+		if c.Value != float64(222) {
+			t.Fatalf("request %d: got value %v of another request", i, c.Value)
+		}
+	}
+}
+
+func TestQueuedRequestTimesOut(t *testing.T) {
+	d, _ := newTestDevice(t, func(req *http.Request, _ string) string {
+		if req.URL.Query().Get("id") == "1.2" {
+			return "" // never answer
+		}
+		return characteristicResponse(1, 3, 222)
+	})
+
+	go getWithTimeout(d, "/characteristics?id=1.2", 2*time.Second)
+	time.Sleep(50 * time.Millisecond)
+
+	start := time.Now()
+	if _, err := getWithTimeout(d, "/characteristics?id=1.3", 100*time.Millisecond); err == nil {
+		t.Fatal("expected timeout")
+	}
+	if waited := time.Since(start); waited > 500*time.Millisecond {
+		t.Fatalf("queued request waited %v, longer than its timeout", waited)
+	}
+}
+
+func TestLostResponseClosesConnection(t *testing.T) {
+	defer func(old time.Duration) { lateResponseTimeout = old }(lateResponseTimeout)
+	lateResponseTimeout = 200 * time.Millisecond
+
+	d, _ := newTestDevice(t, func(*http.Request, string) string { return "" })
+	done := d.Done()
+
+	if _, err := getWithTimeout(d, "/characteristics?id=1.2", 50*time.Millisecond); err == nil {
+		t.Fatal("expected timeout")
+	}
+	// responses can't be matched to requests anymore
+	waitDone(t, done)
+}
+
+func TestPairingRequestTimesOut(t *testing.T) {
+	defer func(old time.Duration) { pairingTimeout = old }(pairingTimeout)
+	pairingTimeout = 100 * time.Millisecond
+
+	d, _ := newTestDevice(t, func(*http.Request, string) string { return "" })
+
+	errc := make(chan error, 1)
+	go func() {
+		_, err := d.doPost("/pairings", HTTPContentTypePairingTLV8, strings.NewReader(""))
+		errc <- err
+	}()
+	select {
+	case err := <-errc:
+		if err == nil {
+			t.Fatal("expected timeout")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("pairing request without answer is stuck")
+	}
+}
