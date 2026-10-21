@@ -9,6 +9,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -308,6 +309,11 @@ func (l *cli) initCommands() {
 		{"unpair", "", "remove pairing from accessory and forget it", true, l.cmdUnpair},
 		{"forget", "", "forget pairing without asking accessory, e.g. after reset", true, l.cmdForget},
 		{"pairings", "", "list controllers paired with accessory", true, l.cmdPairings},
+		{"whoami", "", "show controller id and public key", false, l.cmdWhoami},
+		{"share", "<controller id> <key> [admin]", "add other controller to accessory,\n" +
+			"prints import command to run there", true, l.cmdShare},
+		{"import", "<id> <key> [name]", "add pairing shared by other controller", false, l.cmdImport},
+		{"unshare", "<controller id>", "remove other controller from accessory", true, l.cmdUnshare},
 		{"accessories", "", "load and show accessories", true, l.cmdAccessories},
 		{"identify", "", "ask accessory to identify itself, e.g. blink", true, l.cmdIdentify},
 		{"get", "<aid> <iid> [<aid> <iid>...]", "read characteristics", true, l.cmdGet},
@@ -416,7 +422,11 @@ func (l *cli) cmdVerify([]string) error {
 }
 
 func (l *cli) cmdUnpair([]string) error {
-	if err := l.selected().Unpair(); err != nil {
+	d := l.selected()
+	if err := d.Unpair(); err != nil {
+		if errors.Is(err, hkontroller.ErrNotAdmin) {
+			return fmt.Errorf("%w, ask admin controller to unshare %s, then forget", err, l.c.Id())
+		}
 		return fmt.Errorf("%w, pairing is kept, use forget if accessory was reset", err)
 	}
 	l.printf("unpaired\n")
@@ -441,6 +451,64 @@ func (l *cli) cmdPairings([]string) error {
 		}
 		l.printf("  %-40s %-6s %x\n", p.Id, perm, p.PublicKey)
 	}
+	return nil
+}
+
+func (l *cli) cmdWhoami([]string) error {
+	l.printf("controller %s, public key %x\n", l.c.Id(), l.c.PublicKey())
+	l.printf("to add it to accessory, on other controller: share %s %x\n", l.c.Id(), l.c.PublicKey())
+	return nil
+}
+
+func (l *cli) cmdShare(args []string) error {
+	if len(args) < 2 || len(args) > 3 || len(args) == 3 && args[2] != "admin" {
+		return errors.New("usage: share <controller id> <key> [admin], see whoami")
+	}
+	key, err := hex.DecodeString(args[1])
+	if err != nil {
+		return fmt.Errorf("key: %w", err)
+	}
+	perm := hkontroller.PermissionUser
+	if len(args) == 3 {
+		perm = hkontroller.PermissionAdmin
+	}
+	d := l.selected()
+	if err := d.PairAdd(hkontroller.Pairing{Id: args[0], PublicKey: key, Permission: perm}); err != nil {
+		return err
+	}
+	p := d.GetPairingInfo()
+	l.printf("added, on that controller: import %s %x %s\n", p.Id, p.PublicKey, d.CurrentName())
+	return nil
+}
+
+func (l *cli) cmdUnshare(args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: unshare <controller id>, see pairings")
+	}
+	if args[0] == l.c.Id() {
+		return errors.New("it is this controller, use unpair")
+	}
+	if err := l.selected().PairRemove(args[0]); err != nil {
+		return err
+	}
+	l.printf("removed\n")
+	return nil
+}
+
+func (l *cli) cmdImport(args []string) error {
+	if len(args) < 2 {
+		return errors.New("usage: import <id> <key> [name]")
+	}
+	key, err := hex.DecodeString(args[1])
+	if err != nil {
+		return fmt.Errorf("key: %w", err)
+	}
+	d, err := l.c.AddPairing(hkontroller.Pairing{Name: strings.Join(args[2:], " "), Id: args[0], PublicKey: key})
+	if err != nil {
+		return err
+	}
+	l.printf("pairing added, connecting\n")
+	go l.keepConnected(d)
 	return nil
 }
 

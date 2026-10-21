@@ -102,7 +102,10 @@ and events are enabled for new characteristics that are subscribed to.
 - `KeepConnected` does it for you and reconnects after the connection is lost.
 - `Unpair` removes the pairing from the accessory. `ForgetPairing` forgets it locally,
   e.g. after factory reset.
-- `PairAdd`, `PairRemove` and `ListPairings` manage other controllers.
+- `PairAdd`, `PairRemove` and `ListPairings` manage other controllers,
+  only admin controller may use them, others get `ErrNotAdmin`.
+- `AddPairing` takes pairing made by other controller: it adds this one with `PairAdd`,
+  given `Id` and `PublicKey` of this controller, and passes its `GetPairingInfo` here.
 
 Pairings and controller keys are kept in a `Store`: `NewFsStore` writes files to a directory,
 `NewMemStore` keeps them in memory, or implement your own.

@@ -23,6 +23,11 @@ Commands complete with Tab, history is under arrow keys, Ctrl-C or Ctrl-D quit.
   unpair                                   remove pairing from accessory and forget it
   forget                                   forget pairing without asking accessory, e.g. after reset
   pairings                                 list controllers paired with accessory
+  whoami                                   show controller id and public key
+  share <controller id> <key> [admin]      add other controller to accessory,
+                                           prints import command to run there
+  import <id> <key> [name]                 add pairing shared by other controller
+  unshare <controller id>                  remove other controller from accessory
   accessories                              load and show accessories
   identify                                 ask accessory to identify itself, e.g. blink
   get <aid> <iid> [<aid> <iid>...]         read characteristics
@@ -142,3 +147,34 @@ put: characteristic 2.11 error -70410: invalid value in request
 
 `unpair` removes pairing from accessory, `forget` only forgets it,
 e.g. when accessory was reset.
+
+## second controller
+
+Accessory pairs with one controller, it can add others then. Run second controller
+with own store and name, it tells its id and key:
+
+```text
+$ go run ./examples -store ./.store2 -name hkontrol2
+> whoami
+controller hkontrol2, public key 9036...aa14
+to add it to accessory, on other controller: share hkontrol2 9036...aa14
+```
+
+On the first controller, select accessory and share it, add `admin`
+to let second controller manage pairings too:
+
+```text
+Hk Fake Bridge 391F> share hkontrol2 9036...aa14
+added, on that controller: import 0E:AA:BB:CC:DD:05 2208...aee3 Hk Fake Bridge 391F
+```
+
+Run the printed command on the second controller:
+
+```text
+> import 0E:AA:BB:CC:DD:05 2208...aee3 Hk Fake Bridge 391F
+pairing added, connecting
+Hk Fake Bridge 391F: connected
+```
+
+Controller without admin permission can't unpair itself, `unshare hkontrol2`
+on the first controller removes it, then `forget` on the second one.

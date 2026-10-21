@@ -1,6 +1,7 @@
 package hkontroller
 
 import (
+	"errors"
 	"fmt"
 	"time"
 )
@@ -81,6 +82,20 @@ func pairingError(m pairSetupPayload) error {
 		return &BackoffError{RetryDelay: time.Duration(m.RetryDelay) * time.Second}
 	}
 	return TlvErrorFromCode(m.Error)
+}
+
+// ErrNotAdmin is returned when controller without admin permission
+// adds, removes or lists pairings of accessory.
+var ErrNotAdmin = errors.New("controller is not admin of accessory")
+
+// pairingsError tells that authentication error of /pairings request
+// means controller is not admin.
+func pairingsError(err error) error {
+	var terr *TlvError
+	if errors.As(err, &terr) && terr.Code == TlvErrorAuthentication.Code {
+		return fmt.Errorf("%w: %w", ErrNotAdmin, err)
+	}
+	return err
 }
 
 func TlvErrorFromCode(code byte) error {

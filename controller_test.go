@@ -662,3 +662,93 @@ func TestRenameAfterUnpairKeepsPairingDeleted(t *testing.T) {
 		t.Fatalf("pairing is back: %+v", st.Pairings())
 	}
 }
+
+func TestAddPairing(t *testing.T) {
+	store := NewMemStore()
+	c := newControllerWith(t, store)
+	key := bytes.Repeat([]byte{7}, 32)
+
+	dd, err := c.AddPairing(Pairing{Name: "Bridge", Id: "aa:bb", PublicKey: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dd.IsPaired() || dd.Id() != "AA:BB" || dd.IsDiscovered() {
+		t.Fatalf("device paired=%v id=%q discovered=%v", dd.IsPaired(), dd.Id(), dd.IsDiscovered())
+	}
+
+	// discovery finds it by id
+	if found, first := c.onDnssdAdd(entryWithId("Bridge", "AA:BB")); found != dd || !first {
+		t.Fatal("discovered accessory should be added device")
+	}
+	if _, err := c.AddPairing(Pairing{Id: "AA:BB", PublicKey: key}); err == nil {
+		t.Fatal("expected error for paired device")
+	}
+
+	// kept after restart
+	c2 := newControllerWith(t, store)
+	c2.LoadPairings()
+	if dd := c2.GetDevice("Bridge"); dd == nil || !dd.IsPaired() || !bytes.Equal(dd.GetPairingInfo().PublicKey, key) {
+		t.Fatal("pairing should be stored")
+	}
+}
+
+func TestAddPairingOfDiscoveredDevice(t *testing.T) {
+	c := newTestController(t)
+	dd, _ := c.onDnssdAdd(entryWithId("Hall", "AA:BB"))
+	changed := dd.stateChanged()
+
+	// name given by other controller is old
+	got, err := c.AddPairing(Pairing{Name: "Bridge", Id: "AA:BB", PublicKey: bytes.Repeat([]byte{7}, 32)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != dd || !dd.IsPaired() || dd.GetPairingInfo().Name != "Hall" {
+		t.Fatalf("pairing %+v", dd.GetPairingInfo())
+	}
+	select {
+	case <-changed:
+	default:
+		t.Fatal("KeepConnected should be woken up")
+	}
+}
+
+func TestAddPairingInvalid(t *testing.T) {
+	c := newTestController(t)
+	for _, p := range []Pairing{
+		{Id: "", PublicKey: make([]byte, 32)},
+		{Id: "AA:BB", PublicKey: make([]byte, 31)},
+	} {
+		if _, err := c.AddPairing(p); err == nil {
+			t.Fatalf("%+v: expected error", p)
+		}
+	}
+	if len(c.GetAllDevices()) != 0 {
+		t.Fatal("no device should be added")
+	}
+}
+
+func TestControllerIdentity(t *testing.T) {
+	c := newTestController(t)
+	if c.Id() != "test" || len(c.PublicKey()) != 32 {
+		t.Fatalf("id %q, key %x", c.Id(), c.PublicKey())
+	}
+	c.PublicKey()[0] ^= 1
+	if !bytes.Equal(c.PublicKey(), c.localLTKP) {
+		t.Fatal("key should be copied")
+	}
+}
+
+func TestPairingsNotAdmin(t *testing.T) {
+	// state M2 and authentication error
+	_, err := parsePairings([]byte{6, 1, M2, 7, 1, 2})
+	if err = pairingsError(err); !errors.Is(err, ErrNotAdmin) {
+		t.Fatalf("expected ErrNotAdmin, got %v", err)
+	}
+	var terr *TlvError
+	if !errors.As(err, &terr) || terr.Code != TlvErrorAuthentication.Code {
+		t.Fatalf("tlv error should be kept: %v", err)
+	}
+	if err := pairingsError(&TlvErrorBusy); errors.Is(err, ErrNotAdmin) {
+		t.Fatal("only authentication error means not admin")
+	}
+}
