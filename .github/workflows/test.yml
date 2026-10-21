@@ -8,11 +8,18 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # minimal version from go.mod and the latest release
+        go: [go.mod, stable]
+    name: test (go ${{ matrix.go }})
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: ${{ matrix.go != 'go.mod' && matrix.go || '' }}
+          go-version-file: ${{ matrix.go == 'go.mod' && 'go.mod' || '' }}
       - name: gofmt
         run: |
           files=$(gofmt -l .)
@@ -23,3 +30,7 @@ jobs:
           fi
       - run: go vet ./...
       - run: go test -race -count=1 ./...
+      # fails only if vulnerable code is actually called. Standard library is checked
+      # as of latest release, older patch releases of minimal version have fixed issues
+      - if: matrix.go == 'stable'
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
