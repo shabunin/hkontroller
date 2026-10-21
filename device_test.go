@@ -669,38 +669,78 @@ func TestSetVerifiedOnClosedConnection(t *testing.T) {
 }
 
 // pair-verify requests from several goroutines must share one connection
-func TestPairVerifyOpensSingleConnection(t *testing.T) {
+// connCounter counts connections of fake accessory, open and all.
+type connCounter struct {
+	mu                  sync.Mutex
+	accepted, open, max int
+}
+
+func (c *connCounter) counts() (accepted, open, max int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.accepted, c.open, c.max
+}
+
+// pairingAccessory serves tlv response to every request, device is discovered at it.
+func pairingAccessory(t *testing.T, tlv []byte) (*Device, *connCounter) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	t.Cleanup(func() { ln.Close() })
 
-	var mu sync.Mutex
-	accepted := 0
+	counter := &connCounter{}
 	go func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			mu.Lock()
-			accepted++
-			mu.Unlock()
+			counter.mu.Lock()
+			counter.accepted++
+			counter.open++
+			counter.max = max(counter.max, counter.open)
+			counter.mu.Unlock()
 			acc := &fakeAccessory{t: t, conn: conn, handle: func(*http.Request, string) string {
-				// M2 with authentication error
-				tlv := []byte{6, 1, M2, 7, 1, 2}
-				return fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s", len(tlv), tlv)
+				return tlvResponse(tlv)
 			}}
-			go acc.serve()
+			go func() {
+				acc.serve()
+				conn.Close()
+				counter.mu.Lock()
+				counter.open--
+				counter.mu.Unlock()
+			}()
 		}
 	}()
 
 	d := newDevice("test", nil, "ctrl", nil, nil)
 	d.addDnssdEntry(dnssd.BrowseEntry{Name: "test", IfaceName: "lo", Port: ln.Addr().(*net.TCPAddr).Port,
 		IPs: []net.IP{net.ParseIP("127.0.0.1")}})
+	t.Cleanup(func() { d.Close() })
+	return d, counter
+}
+
+// waitClosed waits until all connections to accessory are closed.
+func waitClosed(t *testing.T, counter *connCounter) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		_, open, _ := counter.counts()
+		if open == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d connections left open", open)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestFailedPairVerifyClosesConnection(t *testing.T) {
+	// M2 with authentication error, e.g. pairing was removed
+	d, counter := pairingAccessory(t, []byte{6, 1, M2, 7, 1, 2})
 	d.setPairing(Pairing{Name: "test", Id: "AA"}, true)
-	defer d.Close()
 
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
@@ -714,10 +754,26 @@ func TestPairVerifyOpensSingleConnection(t *testing.T) {
 	}
 	wg.Wait()
 
-	mu.Lock()
-	defer mu.Unlock()
-	if accepted != 1 {
-		t.Fatalf("%d connections opened", accepted)
+	waitClosed(t, counter)
+	if accepted, _, max := counter.counts(); accepted != 10 || max != 1 {
+		t.Fatalf("%d connections, %d at once, want one attempt at a time", accepted, max)
+	}
+	if d.conn() != nil || !strings.Contains(fmt.Sprint(d.CloseReason()), "pair-verify error on step M2") {
+		t.Fatalf("connection should be closed with verify error, reason: %v", d.CloseReason())
+	}
+}
+
+func TestFailedPairSetupClosesConnection(t *testing.T) {
+	// M2 with unavailable error, e.g. paired with other controller
+	d, counter := pairingAccessory(t, []byte{6, 1, M2, 7, 1, 6})
+
+	var terr *TlvError
+	if err := d.PairSetup("031-45-154"); !errors.As(err, &terr) || terr.Code != TlvErrorUnavailable.Code {
+		t.Fatalf("expected unavailable error, got %v", err)
+	}
+	waitClosed(t, counter)
+	if d.conn() != nil || d.CloseReason() == nil {
+		t.Fatal("connection should be closed with pairing error")
 	}
 }
 
