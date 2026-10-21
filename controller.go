@@ -37,6 +37,10 @@ type Controller struct {
 	cancelDiscovery context.CancelFunc
 	devices         map[string]*Device // by accessory id, see deviceKey
 
+	// pairingsMu serializes saving and deleting of pairings,
+	// so pairing deleted by unpair is not saved again after rename
+	pairingsMu sync.Mutex
+
 	st *storer
 
 	localLTKP []byte
@@ -122,6 +126,16 @@ func (c *Controller) deleteDevice(dd *Device) {
 
 // onPaired is called by device after successful /pair-setup.
 func (c *Controller) onPaired(dd *Device) {
+	c.savePairing(dd)
+}
+
+// savePairing saves pairing of device, if it is still paired.
+func (c *Controller) savePairing(dd *Device) {
+	c.pairingsMu.Lock()
+	defer c.pairingsMu.Unlock()
+	if !dd.IsPaired() {
+		return
+	}
 	p := dd.GetPairingInfo()
 	log.Debug.Println("save pairing: ", p)
 	if err := c.st.SavePairing(p); err != nil {
@@ -131,10 +145,12 @@ func (c *Controller) onPaired(dd *Device) {
 
 // onUnpaired is called by device after pairing was removed.
 func (c *Controller) onUnpaired(dd *Device) {
+	c.pairingsMu.Lock()
 	if err := c.st.DeletePairing(dd.GetPairingInfo().Id); err != nil {
 		log.Info.Println("delete pairing failed: ", err)
 	}
 	dd.setPairing(Pairing{}, false)
+	c.pairingsMu.Unlock()
 
 	dd.close(errors.New("device unpaired"))
 
@@ -169,11 +185,15 @@ func (c *Controller) onDnssdAdd(e dnssd.BrowseEntry) (*Device, bool) {
 	}
 	c.mu.Unlock()
 
-	discovered, configChanged := dd.addDnssdEntry(e)
-	if configChanged {
+	u := dd.addDnssdEntry(e)
+	if u.renamed {
+		// so device is loaded with new name next time
+		c.savePairing(dd)
+	}
+	if u.configChanged {
 		go dd.refreshAccessories()
 	}
-	return dd, discovered
+	return dd, u.first
 }
 
 // onDnssdRemove forgets mdns entry. Device is lost only when it is not
@@ -189,18 +209,26 @@ func (c *Controller) onDnssdRemove(e dnssd.BrowseEntry) (*Device, bool) {
 	return dd, true
 }
 
-// getDevice returns device by name.
+// getDevice returns device by name, current or the one it was created with.
+// Same name may belong to several accessories, e.g. paired one is offline
+// or was renamed, then the one advertised with this name now is preferred.
 func (c *Controller) getDevice(name string) *Device {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	var res *Device
+	best := 0
 	for _, dd := range c.devices {
-		if dd.Name != name {
+		score := 0
+		if dd.CurrentName() == name {
+			score += 2
+		} else if dd.Name != name {
 			continue
 		}
-		// same name may belong to another accessory, e.g. paired one is offline
-		if res == nil || dd.IsDiscovered() {
-			res = dd
+		if dd.IsDiscovered() {
+			score++
+		}
+		if res == nil || score > best {
+			res, best = dd, score
 		}
 	}
 	return res
@@ -398,6 +426,7 @@ func (c *Controller) LoadPairings() error {
 	return nil
 }
 
+// GetDevice returns device by name, see Device.CurrentName.
 func (c *Controller) GetDevice(deviceName string) *Device {
 	return c.getDevice(deviceName)
 }

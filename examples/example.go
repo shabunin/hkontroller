@@ -200,7 +200,7 @@ func (l *cli) selectDevice(d *hkontroller.Device) {
 	if d == nil {
 		l.term.SetPrompt("> ")
 	} else {
-		l.term.SetPrompt(d.Name + "> ")
+		l.term.SetPrompt(d.CurrentName() + "> ")
 	}
 }
 
@@ -209,7 +209,7 @@ func (l *cli) discover() {
 	discoverCh, lostCh := l.c.StartDiscovery()
 	go func() {
 		for d := range discoverCh {
-			l.printf("discovered: %s %s\n", d.Name, d.Id())
+			l.printf("discovered: %s %s\n", d.CurrentName(), d.Id())
 			if d.IsPaired() {
 				go l.keepConnected(d)
 			}
@@ -217,7 +217,7 @@ func (l *cli) discover() {
 	}()
 	go func() {
 		for d := range lostCh {
-			l.printf("lost: %s\n", d.Name)
+			l.printf("lost: %s\n", d.CurrentName())
 		}
 	}()
 }
@@ -241,16 +241,16 @@ func (l *cli) keepConnected(d *hkontroller.Device) {
 	for d.IsPaired() && d.IsDiscovered() {
 		if !d.IsVerified() {
 			if err := d.PairVerify(); err != nil {
-				l.printf("%s: pair-verify: %v\n", d.Name, err)
+				l.printf("%s: pair-verify: %v\n", d.CurrentName(), err)
 				time.Sleep(reconnectTimeout)
 				continue
 			}
-			l.printf("%s: connected\n", d.Name)
+			l.printf("%s: connected\n", d.CurrentName())
 			go l.watchChanges(d, d.Done())
 		}
 		<-d.Done()
 		if d.IsPaired() {
-			l.printf("%s: connection closed: %v\n", d.Name, d.CloseReason())
+			l.printf("%s: connection closed: %v\n", d.CurrentName(), d.CloseReason())
 		}
 		time.Sleep(reconnectTimeout)
 	}
@@ -261,7 +261,7 @@ func (l *cli) watchChanges(d *hkontroller.Device, done <-chan struct{}) {
 	for {
 		select {
 		case <-d.AccessoriesChanged():
-			l.printf("%s: accessories changed, %d now\n", d.Name, len(d.Accessories()))
+			l.printf("%s: accessories changed, %d now\n", d.CurrentName(), len(d.Accessories()))
 		case <-done:
 			return
 		}
@@ -307,7 +307,7 @@ func status(ok bool, s string) string {
 
 func (l *cli) cmdDevices([]string) error {
 	devices := l.c.GetAllDevices()
-	sort.Slice(devices, func(i, j int) bool { return devices[i].Name < devices[j].Name })
+	sort.Slice(devices, func(i, j int) bool { return devices[i].CurrentName() < devices[j].CurrentName() })
 	l.mu.Lock()
 	l.listed = devices
 	l.mu.Unlock()
@@ -319,7 +319,7 @@ func (l *cli) cmdDevices([]string) error {
 	l.printf("%-3s %-18s %-11s %-7s %-9s %s\n", "no", "id", "discovered", "paired", "verified", "name")
 	for i, d := range devices {
 		l.printf("%-3d %-18s %-11s %-7s %-9s %s\n", i, d.Id(),
-			status(d.IsDiscovered(), "yes"), status(d.IsPaired(), "yes"), status(d.IsVerified(), "yes"), d.Name)
+			status(d.IsDiscovered(), "yes"), status(d.IsPaired(), "yes"), status(d.IsVerified(), "yes"), d.CurrentName())
 	}
 	return nil
 }
@@ -341,8 +341,12 @@ func (l *cli) cmdUse(args []string) error {
 		l.selectDevice(listed[i])
 		return nil
 	}
+	if d := l.c.GetDevice(arg); d != nil {
+		l.selectDevice(d)
+		return nil
+	}
 	for _, d := range l.c.GetAllDevices() {
-		if d.Name == arg || strings.EqualFold(d.Id(), arg) {
+		if strings.EqualFold(d.Id(), arg) {
 			l.selectDevice(d)
 			return nil
 		}
@@ -519,7 +523,7 @@ func (l *cli) cmdWatch(args []string) error {
 	}
 	go func() {
 		for ev := range ch {
-			l.printf("event %s %d.%d = %v\n", d.Name, ev.Aid, ev.Iid, ev.Value)
+			l.printf("event %s %d.%d = %v\n", d.CurrentName(), ev.Aid, ev.Iid, ev.Value)
 		}
 	}()
 	l.printf("watching\n")

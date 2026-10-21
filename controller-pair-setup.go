@@ -261,7 +261,7 @@ func (d *Device) pairSetupM5(clientSession *pairSetupClientSession) error {
 	}
 
 	d.mu.Lock()
-	d.pairing.Name = d.Name
+	d.pairing.Name = d.currentNameLocked()
 	d.pairing.Id = accessoryId
 	d.pairing.PublicKey = accessoryLTPK
 	d.mu.Unlock()

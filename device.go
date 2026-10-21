@@ -36,8 +36,8 @@ var pairingTimeout = 60 * time.Second
 var lateResponseTimeout = reqTimeout
 
 type Device struct {
-	// Name is mdns name device had when it was discovered or paired first time.
-	// Accessory may be renamed later, current name is in GetDnssdEntry.
+	// Name is name device was created with, when it was discovered
+	// or loaded from pairing. It doesn't change, see CurrentName.
 	Name string
 
 	id string // accessory id, key in controller devices
@@ -57,6 +57,7 @@ type Device struct {
 
 	dnssdEntries map[string]dnssd.BrowseEntry // mdns entries by interface name
 	configNumber string                       // c# txt record, changes when accessories change
+	currentName  string                       // latest mdns name, accessory may be renamed
 
 	pairing Pairing
 	paired  bool // completed /pair-setup?
@@ -196,19 +197,30 @@ func (d *Device) Id() string {
 	return d.id
 }
 
+// entryUpdate tells what changed when mdns entry was added.
+type entryUpdate struct {
+	first         bool // device was not discovered before
+	configChanged bool // c# changed, accessories have to be loaded again
+	renamed       bool // paired device has new name, pairing has to be saved
+}
+
 // addDnssdEntry stores entry of interface where device is advertised.
-// Returns true if device was not discovered before,
-// and true if accessory configuration number changed.
-func (d *Device) addDnssdEntry(e dnssd.BrowseEntry) (first bool, configChanged bool) {
+func (d *Device) addDnssdEntry(e dnssd.BrowseEntry) entryUpdate {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	first = len(d.dnssdEntries) == 0
+	var u entryUpdate
+	u.first = len(d.dnssdEntries) == 0
 	d.dnssdEntries[e.IfaceName] = copyEntry(e)
 	if cn := e.Text["c#"]; cn != "" {
-		configChanged = d.configNumber != "" && cn != d.configNumber
+		u.configChanged = d.configNumber != "" && cn != d.configNumber
 		d.configNumber = cn
 	}
-	return first, configChanged
+	d.currentName = e.Name
+	if d.paired && d.pairing.Name != e.Name {
+		d.pairing.Name = e.Name
+		u.renamed = true
+	}
+	return u
 }
 
 // removeDnssdEntry forgets entry of interface.
@@ -234,6 +246,21 @@ func (d *Device) entries() []dnssd.BrowseEntry {
 		res = append(res, copyEntry(e))
 	}
 	return res
+}
+
+// CurrentName returns name accessory is advertised with. It differs from Name
+// if accessory was renamed. If device is not discovered, it is the last known name.
+func (d *Device) CurrentName() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.currentNameLocked()
+}
+
+func (d *Device) currentNameLocked() string {
+	if d.currentName != "" {
+		return d.currentName
+	}
+	return d.Name
 }
 
 // GetDnssdEntry returns dnssd entry with IPs of all interfaces device is advertised on.

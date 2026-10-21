@@ -583,3 +583,82 @@ func TestGenerateKeyPair(t *testing.T) {
 	}
 	t.Fatal("seed is made of hex characters")
 }
+
+func TestCurrentNameAfterRename(t *testing.T) {
+	c := newTestController(t)
+	dd, _ := c.onDnssdAdd(entryWithId("A", "AA:BB"))
+	if dd.CurrentName() != "A" {
+		t.Fatalf("current name %q", dd.CurrentName())
+	}
+	c.onDnssdAdd(entryWithId("B", "AA:BB"))
+	c.onDnssdRemove(entryWithId("A", "AA:BB"))
+	if dd.CurrentName() != "B" || dd.Name != "A" {
+		t.Fatalf("current name %q, name %q", dd.CurrentName(), dd.Name)
+	}
+	if c.GetDevice("B") != dd || c.GetDevice("A") != dd {
+		t.Fatal("device should be found by both names")
+	}
+
+	// still known by last name when lost
+	c.onDnssdRemove(entryWithId("B", "AA:BB"))
+	if dd.CurrentName() != "B" {
+		t.Fatalf("current name %q", dd.CurrentName())
+	}
+}
+
+func TestRenameUpdatesStoredPairing(t *testing.T) {
+	store := NewMemStore()
+	st := storer{store}
+	st.SavePairing(Pairing{Name: "Old Name", Id: "AA:BB"})
+	c := newControllerWith(t, store)
+	c.LoadPairings()
+
+	dd, _ := c.onDnssdAdd(entryWithId("New Name", "AA:BB"))
+	if p := dd.GetPairingInfo(); p.Name != "New Name" {
+		t.Fatalf("pairing name %q", p.Name)
+	}
+	pp := st.Pairings()
+	if len(pp) != 1 || pp[0].Name != "New Name" || pp[0].Id != "AA:BB" {
+		t.Fatalf("stored pairings: %+v", pp)
+	}
+
+	// after restart device has new name
+	c2 := newControllerWith(t, store)
+	c2.LoadPairings()
+	if dd := c2.GetDevice("New Name"); dd == nil || !dd.IsPaired() || dd.Name != "New Name" {
+		t.Fatal("device should be loaded with new name")
+	}
+}
+
+func TestGetDevicePrefersCurrentName(t *testing.T) {
+	c := newTestController(t)
+	renamed, _ := c.onDnssdAdd(entryWithId("Bridge", "AA:BB"))
+	c.onDnssdAdd(entryWithId("Hall", "AA:BB"))
+	c.onDnssdRemove(entryWithId("Bridge", "AA:BB"))
+	other, _ := c.onDnssdAdd(entryWithId("Bridge", "CC:DD"))
+
+	// map order is random, so check several times
+	for i := 0; i < 20; i++ {
+		if c.GetDevice("Bridge") != other {
+			t.Fatal("device advertised with the name should be preferred")
+		}
+		if c.GetDevice("Hall") != renamed {
+			t.Fatal("renamed device should be found by current name")
+		}
+	}
+}
+
+func TestRenameAfterUnpairKeepsPairingDeleted(t *testing.T) {
+	store := NewMemStore()
+	st := storer{store}
+	st.SavePairing(Pairing{Name: "Bridge", Id: "AA:BB"})
+	c := newControllerWith(t, store)
+	c.LoadPairings()
+	dd, _ := c.onDnssdAdd(entryWithId("Bridge", "AA:BB"))
+
+	dd.ForgetPairing()
+	c.onDnssdAdd(entryWithId("Hall", "AA:BB"))
+	if len(st.Pairings()) != 0 || dd.IsPaired() {
+		t.Fatalf("pairing is back: %+v", st.Pairings())
+	}
+}
