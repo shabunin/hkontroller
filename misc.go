@@ -4,7 +4,7 @@ import (
 	"crypto/md5"
 	"crypto/rand"
 	"encoding/hex"
-	"github.com/hkontrol/hkontroller/ed25519"
+	"github.com/shabunin/hkontroller/ed25519"
 	"strings"
 )
 

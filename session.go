@@ -4,15 +4,13 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"github.com/hkontrol/hkontroller/chacha20poly1305"
-	"github.com/hkontrol/hkontroller/hkdf"
+	"github.com/shabunin/hkontroller/chacha20poly1305"
+	"github.com/shabunin/hkontroller/hkdf"
 	"io"
 	"sync"
 )
 
 type session struct {
-	Device Device
-
 	encryptKey [32]byte
 	decryptKey [32]byte
 
@@ -26,14 +24,7 @@ func newControllerSession(shared [32]byte, d *Device) (*session, error) {
 	in := []byte("Control-Read-Encryption-Key")
 	out := []byte("Control-Write-Encryption-Key")
 
-	s := &session{
-		Device: Device{
-			pairing:    d.pairing,
-			discovered: d.discovered,
-			paired:     d.paired,
-			verified:   d.verified,
-		},
-	}
+	s := &session{}
 	var err error
 	s.encryptKey, err = hkdf.Sha512(shared[:], salt, out)
 	s.encryptCount = 0

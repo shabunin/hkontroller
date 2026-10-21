@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"github.com/hkontrol/hkontroller/chacha20poly1305"
-	"github.com/hkontrol/hkontroller/ed25519"
-	"github.com/hkontrol/hkontroller/hkdf"
-	"github.com/hkontrol/hkontroller/tlv8"
+	"github.com/shabunin/hkontroller/chacha20poly1305"
+	"github.com/shabunin/hkontroller/ed25519"
+	"github.com/shabunin/hkontroller/hkdf"
+	"github.com/shabunin/hkontroller/tlv8"
 	"io"
 	"net/http"
 )
@@ -261,16 +261,18 @@ func (d *Device) pairSetupM5(clientSession *pairSetupClientSession) error {
 		return &PairSetupError{"M6", errors.New("m6 signature is not valid")}
 	}
 
+	d.mu.Lock()
 	d.pairing.Name = d.Name
 	d.pairing.Id = accessoryId
 	d.pairing.PublicKey = accessoryLTPK
+	d.mu.Unlock()
 
 	return nil
 }
 
 func (d *Device) PairSetup(pin string) error {
 
-	if d.cc == nil || d.cc.closed {
+	if !d.isConnected() {
 		err := d.connect()
 		if err != nil {
 			return err
@@ -289,8 +291,12 @@ func (d *Device) PairSetup(pin string) error {
 	if err != nil {
 		return err
 	}
+	d.mu.Lock()
 	d.paired = true
 	d.verified = false
-	d.emit("paired")
+	d.mu.Unlock()
+	if d.ctrl != nil {
+		d.ctrl.onPaired(d)
+	}
 	return nil
 }

@@ -8,7 +8,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/hkontrol/hkontroller/tlv8"
+	"github.com/shabunin/hkontroller/tlv8"
 )
 
 type pairListReqPayload struct {

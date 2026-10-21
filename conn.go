@@ -7,22 +7,48 @@ import (
 	"errors"
 	"fmt"
 	"github.com/hkontrol/dnssd"
-	"github.com/hkontrol/hkontroller/log"
+	"github.com/shabunin/hkontroller/log"
 	"io"
 	"net"
 	"net/http"
-	"sort"
+	"net/textproto"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
-// dialServiceInstance lookup dnssd service and make tcp connection
-func dialServiceInstance(ctx context.Context, e *dnssd.BrowseEntry, dialTimeout time.Duration) (net.Conn, error) {
+// dialAddrs returns tcp addresses of all entries, ip4 first.
+// IPv6 addresses get zone of interface they were discovered on.
+func dialAddrs(entries []dnssd.BrowseEntry) []string {
+	var addrs4, addrs6 []string
+	seen := make(map[string]bool)
+	for _, e := range entries {
+		for _, ip := range e.IPs {
+			var tcpAddr string
+			if ip.To4() == nil {
+				// ipv6 tcpAddr in square brackets
+				// [fe80::...%wlp2s0]:51510
+				tcpAddr = fmt.Sprintf("[%s%%%s]:%d", ip.String(), e.IfaceName, e.Port)
+			} else {
+				tcpAddr = fmt.Sprintf("%s:%d", ip.String(), e.Port)
+			}
+			if seen[tcpAddr] {
+				continue
+			}
+			seen[tcpAddr] = true
+			if ip.To4() == nil {
+				addrs6 = append(addrs6, tcpAddr)
+			} else {
+				addrs4 = append(addrs4, tcpAddr)
+			}
+		}
+	}
+	return append(addrs4, addrs6...)
+}
 
-	IPs := e.IPs
-	sort.Slice(IPs, func(i, j int) bool {
-		return IPs[i].To4() != nil // ip4 first
-	})
+// dialServiceInstance probes every address of dnssd entries and returns first established tcp connection
+func dialServiceInstance(ctx context.Context, entries []dnssd.BrowseEntry, dialTimeout time.Duration) (net.Conn, error) {
 
 	var firstEstablishedConn net.Conn
 	mu := sync.Mutex{}
@@ -33,16 +59,7 @@ func dialServiceInstance(ctx context.Context, e *dnssd.BrowseEntry, dialTimeout 
 
 	// probe every ip tcpAddr
 	wg := sync.WaitGroup{}
-	for _, ip := range IPs {
-		var tcpAddr string
-		if ip.To4() == nil {
-			// ipv6 tcpAddr in square brackets
-			// [fe80::...%wlp2s0]:51510
-			tcpAddr = fmt.Sprintf("[%s%%%s]:%d", ip.String(), e.IfaceName, e.Port)
-		} else {
-			tcpAddr = fmt.Sprintf("%s:%d", ip.String(), e.Port)
-		}
-
+	for _, tcpAddr := range dialAddrs(entries) {
 		log.Debug.Println("dialing: ", tcpAddr)
 
 		wg.Add(1)
@@ -61,6 +78,8 @@ func dialServiceInstance(ctx context.Context, e *dnssd.BrowseEntry, dialTimeout 
 			if firstEstablishedConn == nil {
 				firstEstablishedConn = tcpConn
 				cancel() // cancel all other attempts
+			} else {
+				tcpConn.Close() // another attempt was faster
 			}
 		}(tcpAddr)
 	}
@@ -75,61 +94,39 @@ func dialServiceInstance(ctx context.Context, e *dnssd.BrowseEntry, dialTimeout 
 }
 
 const eventHeader = "EVENT"
-const httpHeader = "HTTP"
 
-// to transform EVENT into valid HTTP response
-type eventTransformer struct {
-	rr io.Reader
-
-	skipped     bool // indicates that rr.ReadWithTransform("EVENT") was performed
-	transformed bool // indicates that EVENT proto was replaced with HTTP
-	readIndex   int
-}
-
-func newEventTransformer(cc *conn, r io.Reader) *eventTransformer {
-
-	return &eventTransformer{
-		rr:          r,
-		readIndex:   0,
-		skipped:     false,
-		transformed: false,
+// readEvent reads EVENT message from rd. It looks like HTTP response,
+// but starts with "EVENT/1.0" instead of "HTTP/1.1", so http.ReadResponse can't parse it.
+// Only bytes of this message are consumed, so following response is not lost.
+func readEvent(rd *bufio.Reader) (*http.Response, error) {
+	tp := textproto.NewReader(rd)
+	if _, err := tp.ReadLine(); err != nil { // EVENT/1.0 200 OK
+		return nil, err
 	}
-}
-
-// Read reads data and in case of EVENT it replaces EVENT header
-// so http.ReadResponse may be invoked
-func (t *eventTransformer) Read(p []byte) (n int, err error) {
-
-	if !t.skipped {
-		toReplace := make([]byte, len(eventHeader))
-		n := 0
-		for n < len(eventHeader) {
-			k, err := t.rr.Read(toReplace[n:])
-			if err != nil {
-				return 0, err
-			}
-			n += k
-		}
-		t.skipped = true
+	hdr, err := tp.ReadMIMEHeader()
+	if err != nil {
+		return nil, err
 	}
-
-	for !t.transformed {
-		d := []byte(httpHeader)
-		n = copy(p, d[t.readIndex:])
-		t.readIndex += n
-		if t.readIndex >= len(d) {
-			t.transformed = true
-		}
+	n, err := strconv.Atoi(hdr.Get("Content-Length"))
+	if err != nil || n < 0 {
+		return nil, fmt.Errorf("invalid event content length: %q", hdr.Get("Content-Length"))
 	}
-
-	nn, err := t.rr.Read(p[t.readIndex:])
-	return t.readIndex + nn, err
+	body := make([]byte, n)
+	if _, err := io.ReadFull(rd, body); err != nil {
+		return nil, err
+	}
+	return &http.Response{
+		StatusCode:    http.StatusOK,
+		Header:        http.Header(hdr),
+		ContentLength: int64(n),
+		Body:          io.NopCloser(bytes.NewReader(body)),
+	}, nil
 }
 
 type conn struct {
 	net.Conn
 
-	closed bool
+	closed atomic.Bool
 
 	// s and ss are used to encrypt data. s is used to temporarily store the session.
 	// After the next read, ss becomes s and the session is encrypted from then on.
@@ -143,32 +140,75 @@ type conn struct {
 	readBuf   io.Reader
 	bufReader *bufio.Reader
 
-	inBackground   bool
-	backgroundStop chan interface{}
+	// backgroundStop is nil until startLoop is called, then closed when loop stops
+	bmu            sync.Mutex
+	backgroundStop chan struct{}
 
 	onEvent func(*http.Response) // EVENT callback, when characteristic value updated
 
-	// indicates if response channel is open. it may be closed if request context was done
-	wantResponse bool
-	response     chan *http.Response // assume that one request wants one response
-	resError     chan error
+	done chan struct{} // closed by device when connection is closed
+
+	// pending receives response for the request in flight, nil if nobody waits.
+	// It is buffered, so loop never blocks even if requester is gone.
+	pmu     sync.Mutex
+	pending chan responseResult
+}
+
+type responseResult struct {
+	res *http.Response
+	err error
 }
 
 func newConn(c net.Conn) *conn {
-	cc := &conn{
-		Conn:     c,
-		smu:      sync.Mutex{},
-		response: make(chan *http.Response),
-		resError: make(chan error),
-		closed:   false,
-	}
-
-	return cc
+	return &conn{Conn: c, done: make(chan struct{})}
 }
 
 func (c *conn) close() {
-	c.closed = true
+	c.closed.Store(true)
 	c.Conn.Close()
+}
+
+func (c *conn) isClosed() bool {
+	return c.closed.Load()
+}
+
+// startLoop runs loop in background. Returned channel is closed when loop stops.
+func (c *conn) startLoop() <-chan struct{} {
+	stop := make(chan struct{})
+	c.bmu.Lock()
+	c.backgroundStop = stop
+	c.bmu.Unlock()
+	go func() {
+		defer close(stop)
+		c.loop()
+	}()
+	return stop
+}
+
+// loopStopped returns channel closed when background loop stops,
+// or nil if loop was not started.
+func (c *conn) loopStopped() <-chan struct{} {
+	c.bmu.Lock()
+	defer c.bmu.Unlock()
+	return c.backgroundStop
+}
+
+// expectResponse registers ch to receive response read by loop.
+func (c *conn) expectResponse(ch chan responseResult) {
+	c.pmu.Lock()
+	c.pending = ch
+	c.pmu.Unlock()
+}
+
+// deliver passes response to waiting request, if any.
+func (c *conn) deliver(res *http.Response, err error) {
+	c.pmu.Lock()
+	ch := c.pending
+	c.pending = nil
+	c.pmu.Unlock()
+	if ch != nil {
+		ch <- responseResult{res, err}
+	}
 }
 
 func (c *conn) SetEventCallback(cb func(*http.Response)) {
@@ -246,40 +286,21 @@ func (c *conn) Read(b []byte) (int, error) {
 }
 
 func (c *conn) loop() {
-	c.backgroundStop = make(chan interface{})
-	defer func() {
-		close(c.backgroundStop)
-	}()
-	c.inBackground = true
-	defer func() {
-		c.inBackground = false
-	}()
 	rd := bufio.NewReader(c)
-	for !c.closed {
+	for !c.isClosed() {
 		b, err := rd.Peek(len(eventHeader)) // len of EVENT string
 		if err != nil {
 			log.Debug.Println("error reading from connection: ", err)
+			c.deliver(nil, err)
 			return
 		}
-		//fmt.Println("---")
-		//fmt.Println("rd.Peek: ", string(b))
 		if string(b) == eventHeader {
-			rt := newEventTransformer(c, rd)
-			rb := bufio.NewReader(rt)
-
-			res, err := http.ReadResponse(rb, nil)
+			res, err := readEvent(rd)
 			if err != nil {
+				log.Debug.Println("event error: ", err)
+				c.deliver(nil, err)
 				return
 			}
-
-			all, err := io.ReadAll(res.Body)
-			res.Body.Close()
-			if err != nil {
-				continue
-			}
-
-			// then assign new res.Body
-			res.Body = io.NopCloser(bytes.NewReader(all))
 
 			if c.onEvent != nil {
 				c.onEvent(res)
@@ -290,34 +311,23 @@ func (c *conn) loop() {
 			res, err := http.ReadResponse(rd, nil)
 			if err != nil {
 				log.Debug.Println("response error: ", err)
-				if c.wantResponse {
-					c.resError <- err
-				}
+				c.deliver(nil, err)
 				continue
 			}
-			//dump, err := httputil.DumpResponse(res, false)
-			//fmt.Println(string(dump), err)
 
 			// ReadAll here because if response is chunked then on next loop there will be error
-			//fmt.Println("reading HTTP response body")
-
 			all, err := io.ReadAll(res.Body)
-			//fmt.Println("reading HTTP response body done. err: ", err)
 			res.Body.Close()
 			if err != nil {
 				log.Debug.Println("response body read error: ", err)
-				if c.wantResponse {
-					c.resError <- err
-				}
+				c.deliver(nil, err)
 				continue
 			}
 
 			// then assign new res.Body
 			res.Body = io.NopCloser(bytes.NewReader(all))
 
-			if c.wantResponse {
-				c.response <- res
-			}
+			c.deliver(res, nil)
 		}
 	}
 }
