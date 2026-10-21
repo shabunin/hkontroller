@@ -412,8 +412,12 @@ func (d *Device) startBackgroundRead(cc *conn) {
 	stopped := cc.startLoop()
 	go func() {
 		<-stopped
-		log.Debug.Println("background read: loop stopped")
-		d.closeConn(cc, errors.New("stop background read"))
+		reason := cc.loopError()
+		log.Debug.Println("background read: loop stopped: ", reason)
+		if reason == nil {
+			reason = errors.New("stop background read")
+		}
+		d.closeConn(cc, reason)
 	}()
 }
 

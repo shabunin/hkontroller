@@ -143,6 +143,7 @@ type conn struct {
 	// backgroundStop is nil until startLoop is called, then closed when loop stops
 	bmu            sync.Mutex
 	backgroundStop chan struct{}
+	loopErr        error // why loop stopped, set before backgroundStop is closed
 
 	onEvent func(*http.Response) // EVENT callback, when characteristic value updated
 
@@ -181,10 +182,21 @@ func (c *conn) startLoop() <-chan struct{} {
 	c.backgroundStop = stop
 	c.bmu.Unlock()
 	go func() {
-		defer close(stop)
-		c.loop()
+		err := c.loop()
+		c.bmu.Lock()
+		c.loopErr = err
+		c.bmu.Unlock()
+		close(stop)
 	}()
 	return stop
+}
+
+// loopError returns error which stopped background loop,
+// nil if it is still running or connection was closed.
+func (c *conn) loopError() error {
+	c.bmu.Lock()
+	defer c.bmu.Unlock()
+	return c.loopErr
 }
 
 // loopStopped returns channel closed when background loop stops,
@@ -296,21 +308,21 @@ func (c *conn) Read(b []byte) (int, error) {
 	return c.readBuf.Read(b)
 }
 
-func (c *conn) loop() {
+func (c *conn) loop() error {
 	rd := bufio.NewReader(c)
 	for !c.isClosed() {
 		b, err := rd.Peek(len(eventHeader)) // len of EVENT string
 		if err != nil {
 			log.Debug.Println("error reading from connection: ", err)
 			c.deliver(nil, err)
-			return
+			return err
 		}
 		if string(b) == eventHeader {
 			res, err := readEvent(rd)
 			if err != nil {
 				log.Debug.Println("event error: ", err)
 				c.deliver(nil, err)
-				return
+				return err
 			}
 
 			if c.onEvent != nil {
@@ -325,7 +337,7 @@ func (c *conn) loop() {
 			if err != nil {
 				log.Debug.Println("response error: ", err)
 				c.deliver(nil, err)
-				return
+				return err
 			}
 
 			// ReadAll here because if response is chunked then on next loop there will be error
@@ -334,7 +346,7 @@ func (c *conn) loop() {
 			if err != nil {
 				log.Debug.Println("response body read error: ", err)
 				c.deliver(nil, err)
-				return
+				return err
 			}
 
 			// then assign new res.Body
@@ -343,4 +355,5 @@ func (c *conn) loop() {
 			c.deliver(res, nil)
 		}
 	}
+	return nil
 }
