@@ -27,6 +27,13 @@ var closedChan = func() chan struct{} {
 const dialTimeout = 5 * time.Second
 const reqTimeout = 15 * time.Second
 
+// pairingTimeout is longer, since slow accessories need time for SRP and key generation
+var pairingTimeout = 60 * time.Second
+
+// lateResponseTimeout is how long to wait for response of timed out request
+// before connection is considered broken
+var lateResponseTimeout = reqTimeout
+
 type Device struct {
 	Name string
 
@@ -57,43 +64,83 @@ type Device struct {
 }
 
 type roundTripper struct {
-	cc *conn
-	mu sync.Mutex
+	cc   *conn
+	turn chan struct{} // taken by request in flight, one at a time
 }
 
 func newRoundTripper(cc *conn) *roundTripper {
-	return &roundTripper{cc: cc}
+	return &roundTripper{cc: cc, turn: make(chan struct{}, 1)}
 }
+
+var errConnClosed = errors.New("connection closed")
 
 // RoundTrip implementation to be able to use with http.Client
 func (r *roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
+	ctx := req.Context()
 	// if background loop is running, response comes from it
 	stopped := r.cc.loopStopped()
-	var response chan responseResult
-	if stopped != nil {
-		response = make(chan responseResult, 1)
-		r.cc.expectResponse(response)
-		defer r.cc.expectResponse(nil)
+
+	// wait for previous request, but not longer than this one may take
+	select {
+	case r.turn <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-stopped:
+		return nil, errConnClosed
+	}
+	release := func() { <-r.turn }
+
+	if stopped == nil {
+		defer release()
+		return r.readDirect(req)
 	}
 
-	err := req.Write(r.cc)
-	if err != nil {
+	response := r.cc.expectResponse()
+	if err := req.Write(r.cc); err != nil {
+		// request may be written partially, following responses can't be trusted
+		r.cc.close()
+		release()
 		return nil, err
 	}
 
-	if stopped != nil {
-		select {
-		case rr := <-response:
-			return rr.res, rr.err
-		case <-stopped:
-			return nil, errors.New("connection closed")
-		case <-req.Context().Done():
-			return nil, req.Context().Err()
-		}
+	select {
+	case rr := <-response:
+		release()
+		return rr.res, rr.err
+	case <-stopped:
+		release()
+		return nil, errConnClosed
+	case <-ctx.Done():
+		// keep the turn until late response arrives,
+		// so that next request is not sent to busy accessory
+		go r.awaitLateResponse(response, stopped, release)
+		return nil, ctx.Err()
+	}
+}
+
+// awaitLateResponse discards response of timed out request. If it doesn't come,
+// connection is closed, since responses can't be matched to requests anymore.
+func (r *roundTripper) awaitLateResponse(response chan responseResult, stopped <-chan struct{}, release func()) {
+	defer release()
+	select {
+	case <-response:
+		log.Debug.Println("late response discarded")
+	case <-stopped:
+	case <-time.After(lateResponseTimeout):
+		log.Debug.Println("no response from accessory, closing connection")
+		r.cc.close()
+	}
+}
+
+// readDirect is used before background loop is started, during pairing.
+func (r *roundTripper) readDirect(req *http.Request) (*http.Response, error) {
+	if deadline, ok := req.Context().Deadline(); ok {
+		r.cc.Conn.SetDeadline(deadline)
+		defer r.cc.Conn.SetDeadline(time.Time{})
+	}
+
+	if err := req.Write(r.cc); err != nil {
+		return nil, err
 	}
 
 	rd := bufio.NewReader(r.cc)
@@ -205,19 +252,17 @@ func (d *Device) doRequest(req *http.Request) (*http.Response, error) {
 	}
 	return httpc.Do(req)
 }
+
+// doPost is used for pairing requests.
 func (d *Device) doPost(url string, contentType string, body io.Reader) (*http.Response, error) {
-	httpc, err := d.client()
+	ctx, cancel := context.WithTimeout(context.Background(), pairingTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "POST", url, body)
 	if err != nil {
 		return nil, err
 	}
-	return httpc.Post(url, contentType, body)
-}
-func (d *Device) doGet(url string) (*http.Response, error) {
-	httpc, err := d.client()
-	if err != nil {
-		return nil, err
-	}
-	return httpc.Get(url)
+	req.Header.Set("Content-Type", contentType)
+	return d.doRequest(req)
 }
 
 func (d *Device) close(reason error) {
