@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -563,4 +564,22 @@ func TestFsStoreWrites(t *testing.T) {
 	if _, err := st.Get("missing"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected not exist error, got %v", err)
 	}
+}
+
+func TestGenerateKeyPair(t *testing.T) {
+	kp1, err := generateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kp2, _ := generateKeyPair()
+	if len(kp1.Public) != 32 || len(kp1.Private) != 64 || bytes.Equal(kp1.Private, kp2.Private) {
+		t.Fatalf("bad keypairs: %x %x", kp1.Private, kp2.Private)
+	}
+	// seed is first half of private key, it was ascii hex before
+	for _, b := range kp1.Private[:32] {
+		if !strings.ContainsRune("0123456789abcdef", rune(b)) {
+			return
+		}
+	}
+	t.Fatal("seed is made of hex characters")
 }
