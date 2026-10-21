@@ -2,6 +2,7 @@ package hkontroller
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"strings"
@@ -424,6 +425,56 @@ func (c *Controller) LoadPairings() error {
 	}
 
 	return nil
+}
+
+// Id returns controller id, accessories know this controller by it.
+func (c *Controller) Id() string {
+	return c.name
+}
+
+// PublicKey returns long-term public key of controller.
+func (c *Controller) PublicKey() []byte {
+	return append([]byte(nil), c.localLTKP...)
+}
+
+// AddPairing adds pairing with accessory made by another controller.
+// That controller is admin of accessory, it adds this one with PairAdd,
+// giving Id and PublicKey of this controller, and passes GetPairingInfo
+// of its device here. Pairing is saved and device is returned
+// to be verified, e.g. with KeepConnected.
+func (c *Controller) AddPairing(p Pairing) (*Device, error) {
+	if p.Id == "" {
+		return nil, errors.New("pairing has no accessory id")
+	}
+	if len(p.PublicKey) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("accessory public key must be %d bytes, got %d", ed25519.PublicKeySize, len(p.PublicKey))
+	}
+	key := strings.ToUpper(p.Id)
+
+	c.pairingsMu.Lock()
+	defer c.pairingsMu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	dd := c.devices[key]
+	if dd != nil {
+		if dd.IsPaired() {
+			return nil, errors.New("device is paired already")
+		}
+		p.Name = dd.CurrentName()
+	} else if p.Name == "" {
+		p.Name = p.Id
+	}
+	if err := c.st.SavePairing(p); err != nil {
+		return nil, fmt.Errorf("save pairing: %w", err)
+	}
+	if dd == nil {
+		dd = newDevice(p.Name, c, c.name, c.localLTKP, c.localLTSK)
+		dd.id = key
+		c.devices[key] = dd
+	}
+	dd.setPairing(p, true)
+	return dd, nil
 }
 
 // GetDevice returns device by name, see Device.CurrentName.

@@ -31,7 +31,7 @@ func (d *Device) PairAdd(p Pairing) error {
 }
 
 // postPairings sends add or remove pairing request and checks response:
-// state M2, or state and error, e.g. controller is not admin.
+// state M2, or state and error, e.g. ErrNotAdmin.
 func (d *Device) postPairings(pl interface{}) error {
 	b, err := tlv8.Marshal(pl)
 	if err != nil {
@@ -58,5 +58,5 @@ func (d *Device) postPairings(pl interface{}) error {
 	if m2.State != M2 {
 		return fmt.Errorf("unexpected state %x, expected: %x", m2.State, M2)
 	}
-	return pairingError(m2)
+	return pairingsError(pairingError(m2))
 }

@@ -45,7 +45,8 @@ func (d *Device) ListPairings() ([]Pairing, error) {
 	if err != nil {
 		return nil, err
 	}
-	return parsePairings(all)
+	pp, err := parsePairings(all)
+	return pp, pairingsError(err)
 }
 
 // parsePairings parses list pairings response: state, then pairings
