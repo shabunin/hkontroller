@@ -1,6 +1,7 @@
 package hkontroller
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -333,5 +334,63 @@ func TestDiscoveryRetriesWithDelay(t *testing.T) {
 	defer mu.Unlock()
 	if calls < 2 || calls > 6 {
 		t.Fatalf("lookup called %d times, expected retry every 50ms", calls)
+	}
+}
+
+func TestFsStoreOverwrite(t *testing.T) {
+	st := NewFsStore(t.TempDir())
+	if err := st.Set("key", []byte("long value")); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Set("key", []byte("short")); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := st.Get("key"); string(b) != "short" {
+		t.Fatalf("got %q", b)
+	}
+}
+
+func TestEscapedPairingSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	st := storer{NewFsStore(dir)}
+	if err := st.SavePairing(Pairing{Name: `Hk\ Bridge`, Id: "AA:BB"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// first start migrates name and saves shorter pairing
+	for i := 0; i < 2; i++ {
+		c, err := NewController(NewFsStore(dir), "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := c.LoadPairings(); err != nil {
+			t.Fatal(err)
+		}
+		if dd := c.GetDevice("Hk Bridge"); dd == nil || !dd.IsPaired() {
+			t.Fatalf("start %d: pairing is lost", i)
+		}
+	}
+}
+
+func TestLoadPairingWithTrailingData(t *testing.T) {
+	// pairing file overwritten without truncate by older versions
+	st := storer{NewMemStore()}
+	st.Set(keyForPairingName("AA:BB"), []byte(`{"name":"Hk Bridge","id":"AA:BB"}"}`))
+
+	if pp := st.Pairings(); len(pp) != 1 || pp[0].Name != "Hk Bridge" {
+		t.Fatalf("damaged pairing is not loaded: %+v", pp)
+	}
+}
+
+func TestSplitMac(t *testing.T) {
+	for _, n := range []int{0, 4, 15} {
+		if _, _, err := splitMac(make([]byte, n)); err == nil {
+			t.Fatalf("%d bytes: expected error", n)
+		}
+	}
+	data := append([]byte("msg"), bytes.Repeat([]byte{7}, 16)...)
+	msg, mac, err := splitMac(data)
+	if err != nil || string(msg) != "msg" || mac[0] != 7 || mac[15] != 7 {
+		t.Fatalf("got %q %v %v", msg, mac, err)
 	}
 }

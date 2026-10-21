@@ -2,6 +2,7 @@ package hkontroller
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -491,5 +492,115 @@ func TestPairingRequestTimesOut(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("pairing request without answer is stuck")
+	}
+}
+
+// newEncryptedTestDevice returns verified device with encrypted session to fake accessory.
+// Accessory side uses conn as well, so packets are split like by real accessory.
+func newEncryptedTestDevice(t *testing.T, handle func(*http.Request, string) string) (*Device, *fakeAccessory) {
+	client, server := net.Pipe()
+	ss := &session{}
+	copy(ss.encryptKey[:], bytes.Repeat([]byte{1}, 32))
+	copy(ss.decryptKey[:], bytes.Repeat([]byte{2}, 32))
+	sc := newConn(server)
+	sc.UpgradeEnc(&session{encryptKey: ss.decryptKey, decryptKey: ss.encryptKey})
+	acc := &fakeAccessory{t: t, conn: sc, handle: handle}
+	go acc.serve()
+
+	d := newDevice("test", nil, "ctrl", nil, nil)
+	cc := newConn(client)
+	cc.SetEventCallback(d.onEvent)
+	cc.UpgradeEnc(ss)
+	d.cc = cc
+	d.httpc = &http.Client{Transport: newRoundTripper(cc)}
+	d.verified = true
+	d.startBackgroundRead(cc)
+
+	t.Cleanup(func() {
+		server.Close()
+		closeWithin(t, d, time.Second)
+	})
+	return d, acc
+}
+
+func TestEncryptedResponseSizes(t *testing.T) {
+	const header = "HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n"
+	size := 0
+	d, _ := newEncryptedTestDevice(t, func(*http.Request, string) string {
+		return fmt.Sprintf(header, size) + strings.Repeat("x", size)
+	})
+
+	// covers messages ending exactly at packet boundary, 1024, 2048...
+	for size = 1; size <= 5200; size++ {
+		res, err := getWithTimeout(d, "/x", time.Second)
+		if err != nil {
+			t.Fatalf("body %d, message %d: %v", size, len(fmt.Sprintf(header, size))+size, err)
+		}
+		if b, _ := io.ReadAll(res.Body); len(b) != size {
+			t.Fatalf("body %d: got %d bytes", size, len(b))
+		}
+	}
+}
+
+func TestEncryptedEventAtPacketBoundary(t *testing.T) {
+	d, acc := newEncryptedTestDevice(t, noContent)
+	ch, err := d.SubscribeToEvents(1, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// pad string value, so event is exactly one full packet
+	pad := 0
+	ev := eventMessage(1, 2, `""`)
+	for len(ev) != packetLengthMax {
+		pad += packetLengthMax - len(ev)
+		ev = eventMessage(1, 2, `"`+strings.Repeat("x", pad)+`"`)
+	}
+	acc.write(ev)
+	receive(t, ch)
+}
+
+func TestConnReadAfterExactPacket(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	ss := &session{}
+	cc := newConn(client)
+	cc.UpgradeEnc(ss)
+
+	go func() {
+		acc := &session{encryptKey: ss.decryptKey}
+		for _, msg := range []string{"first", "second"} {
+			enc, _ := acc.Encrypt(strings.NewReader(msg))
+			io.Copy(server, enc)
+		}
+	}()
+
+	// buffer of exact packet size, next read must not return io.EOF
+	for _, want := range []string{"first", "second"} {
+		b := make([]byte, len(want))
+		if n, err := cc.Read(b); err != nil || string(b[:n]) != want {
+			t.Fatalf("got %q, %v, want %q", b[:n], err, want)
+		}
+	}
+}
+
+func TestPairVerifyShortEncryptedData(t *testing.T) {
+	client, server := net.Pipe()
+	defer server.Close()
+	acc := &fakeAccessory{t: t, conn: server, handle: func(*http.Request, string) string {
+		// M2 with public key and 4 bytes of encrypted data, MAC alone is 16
+		tlv := append([]byte{6, 1, M2, 3, 32}, make([]byte, 32)...)
+		tlv = append(tlv, 5, 4, 1, 2, 3, 4)
+		return fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s", len(tlv), tlv)
+	}}
+	go acc.serve()
+
+	d := newDevice("test", nil, "ctrl", nil, nil)
+	d.cc = newConn(client)
+	d.httpc = &http.Client{Transport: newRoundTripper(d.cc)}
+	d.paired = true
+
+	if err := d.PairVerify(); err == nil {
+		t.Fatal("expected error")
 	}
 }

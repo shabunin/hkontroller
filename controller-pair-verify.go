@@ -92,10 +92,10 @@ func (d *Device) PairVerify() error {
 		return &PairVerifyError{"M2", err}
 	}
 
-	data := m2.EncryptedData
-	message := data[:(len(data) - 16)]
-	var mac [16]byte
-	copy(mac[:], data[len(message):]) // 16 byte (MAC)
+	message, mac, err := splitMac(m2.EncryptedData)
+	if err != nil {
+		return &PairVerifyError{"M2", err}
+	}
 
 	decryptedBytes, err := chacha20poly1305.DecryptAndVerify(
 		encKey[:],

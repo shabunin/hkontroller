@@ -4,6 +4,7 @@ import (
 	"crypto/md5"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"github.com/shabunin/hkontroller/ed25519"
 	"strings"
 )
@@ -92,4 +93,15 @@ func mac48Address(input string) string {
 
 func toHex(b byte) string {
 	return hex.EncodeToString([]byte{b})
+}
+
+// splitMac splits encrypted data of pairing message into message and 16 byte MAC.
+func splitMac(data []byte) ([]byte, [16]byte, error) {
+	var mac [16]byte
+	if len(data) < len(mac) {
+		return nil, mac, errors.New("encrypted data is too short")
+	}
+	message := data[:len(data)-len(mac)]
+	copy(mac[:], data[len(message):])
+	return message, mac, nil
 }

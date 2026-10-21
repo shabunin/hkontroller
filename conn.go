@@ -137,7 +137,7 @@ type conn struct {
 	smu sync.Mutex
 	ss  *session
 
-	readBuf   io.Reader
+	readBuf   *bytes.Buffer // decrypted data of last packet not read yet
 	bufReader *bufio.Reader
 
 	// backgroundStop is nil until startLoop is called, then closed when loop stops
@@ -274,7 +274,8 @@ func (c *conn) Read(b []byte) (int, error) {
 	if c.bufReader == nil {
 		c.bufReader = bufio.NewReader(c.Conn)
 	}
-	if c.readBuf == nil {
+	// empty buffer would return io.EOF, so next packet is read instead
+	for c.readBuf == nil || c.readBuf.Len() == 0 {
 		buf, err := c.ss.Decrypt(c.bufReader)
 		if err != nil {
 			c.close()
@@ -284,13 +285,7 @@ func (c *conn) Read(b []byte) (int, error) {
 		c.readBuf = buf
 	}
 
-	n, err := c.readBuf.Read(b)
-
-	if n < len(b) || err == io.EOF {
-		c.readBuf = nil
-	}
-
-	return n, err
+	return c.readBuf.Read(b)
 }
 
 func (c *conn) loop() {
