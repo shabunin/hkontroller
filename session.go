@@ -98,9 +98,10 @@ func (s *session) Decrypt(r io.Reader) (*bytes.Buffer, error) {
 
 	decrypted, err := chacha20poly1305.DecryptAndVerify(s.decryptKey[:], nonce[:], b, mac, lengthBytes)
 	if err != nil {
-		// TODO: examine. sometimes it doesn't decrypt data when EVENT/1.0 present
-		// 		  but if we apply decryption with counter+1 it works
-		return nil, fmt.Errorf("data encryption failed: %w", err)
+		// Counter is out of sync, e.g. accessory that sends events from several
+		// threads without lock encrypted packets in one order, but wrote them in
+		// another. Following packets can't be trusted, connection has to be closed.
+		return nil, fmt.Errorf("decrypting packet %d failed: %w", s.decryptCount-1, err)
 	}
 
 	return bytes.NewBuffer(decrypted), nil

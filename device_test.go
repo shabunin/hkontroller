@@ -1067,3 +1067,35 @@ func TestEncryptedShortWriteClosesConn(t *testing.T) {
 		t.Fatal("connection with broken encryption counter is not closed")
 	}
 }
+
+// Accessory sending events from several threads without lock may encrypt
+// them in one order and write in another. Stream can't be trusted after that.
+func TestOutOfOrderPacketsCloseConnection(t *testing.T) {
+	d, acc := newEncryptedTestDevice(t, noContent)
+	ch, err := d.SubscribeToEvents(1, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// packet 0 was response to subscribe
+	sc := acc.conn.(*conn)
+	ss := sc.session()
+	first, err := ss.Encrypt(strings.NewReader(eventMessage(1, 2, 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := ss.Encrypt(strings.NewReader(eventMessage(1, 2, 2)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	acc.wmu.Lock()
+	io.Copy(sc.Conn, second)
+	io.Copy(sc.Conn, first)
+	acc.wmu.Unlock()
+
+	waitDone(t, d.Done())
+	expectClosed(t, ch)
+	if reason := d.CloseReason(); reason == nil || !strings.Contains(reason.Error(), "decrypting packet 1 failed") {
+		t.Fatalf("close reason: %v", reason)
+	}
+}
