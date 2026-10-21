@@ -68,6 +68,8 @@ type Device struct {
 	httpc       *http.Client // http client with encryption support
 	accs        []*Accessory
 	accsChanged chan struct{} // closed when accessories are loaded again after configuration change
+	changed     chan struct{} // closed when device is discovered again or pairing changes, see stateChanged
+	keeping     bool          // KeepConnected is running
 
 	subscribeMu sync.Mutex // serializes subscribe/unsubscribe requests
 	subsMu      sync.Mutex // guards subs, never held during requests
@@ -209,6 +211,9 @@ func (d *Device) addDnssdEntry(e dnssd.BrowseEntry) entryUpdate {
 	defer d.mu.Unlock()
 	var u entryUpdate
 	u.first = len(d.dnssdEntries) == 0
+	if u.first {
+		d.notifyStateChanged()
+	}
 	d.dnssdEntries[e.IfaceName] = copyEntry(e)
 	if cn := e.Text["c#"]; cn != "" {
 		u.configChanged = d.configNumber != "" && cn != d.configNumber
@@ -278,6 +283,9 @@ func (d *Device) GetDnssdEntry() dnssd.BrowseEntry {
 func (d *Device) setPairing(p Pairing, paired bool) {
 	d.mu.Lock()
 	d.pairing = p
+	if d.paired != paired {
+		d.notifyStateChanged()
+	}
 	d.paired = paired
 	d.mu.Unlock()
 }

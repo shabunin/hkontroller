@@ -8,6 +8,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -23,8 +24,6 @@ import (
 	"github.com/shabunin/hkontroller/log"
 	"golang.org/x/term"
 )
-
-const reconnectTimeout = 3 * time.Second
 
 type command struct {
 	name  string
@@ -45,6 +44,17 @@ type cli struct {
 	device     *hkontroller.Device
 	listed     []*hkontroller.Device // last devices listing, for use <no>
 	connecting map[*hkontroller.Device]bool
+	watches    map[*hkontroller.Device][]watch // subscribed again after reconnect
+}
+
+// watch is characteristic, accessory or all of them, any is -1.
+type watch struct {
+	aid, iid int64
+}
+
+// within tells if w is part of scope, like subscriptions closed by Unsubscribe* methods.
+func (w watch) within(scope watch) bool {
+	return (scope.aid == -1 || scope.aid == w.aid) && (scope.iid == -1 || scope.iid == w.iid)
 }
 
 func main() {
@@ -59,7 +69,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	l := &cli{c: c, out: os.Stdout, restore: func() {}, connecting: make(map[*hkontroller.Device]bool)}
+	l := &cli{c: c, out: os.Stdout, restore: func() {}, connecting: make(map[*hkontroller.Device]bool),
+		watches: make(map[*hkontroller.Device][]watch)}
 	l.initCommands()
 
 	fd := int(os.Stdin.Fd())
@@ -85,6 +96,10 @@ func main() {
 	}
 
 	_ = c.LoadPairings()
+	// paired devices are connected when discovered
+	for _, d := range c.GetPairedDevices() {
+		go l.keepConnected(d)
+	}
 	l.discover()
 	l.printf("type help for commands\n")
 	l.run()
@@ -204,15 +219,12 @@ func (l *cli) selectDevice(d *hkontroller.Device) {
 	}
 }
 
-// discover prints discovered and lost devices and connects to paired ones.
+// discover prints discovered and lost devices.
 func (l *cli) discover() {
 	discoverCh, lostCh := l.c.StartDiscovery()
 	go func() {
 		for d := range discoverCh {
 			l.printf("discovered: %s %s\n", d.CurrentName(), d.Id())
-			if d.IsPaired() {
-				go l.keepConnected(d)
-			}
 		}
 	}()
 	go func() {
@@ -222,8 +234,8 @@ func (l *cli) discover() {
 	}()
 }
 
-// keepConnected verifies paired device and reconnects when connection breaks,
-// while device is paired and discovered. There is one loop per device.
+// keepConnected runs reconnect loop of the library while device is paired.
+// There is one loop per device.
 func (l *cli) keepConnected(d *hkontroller.Device) {
 	l.mu.Lock()
 	if l.connecting[d] {
@@ -235,24 +247,42 @@ func (l *cli) keepConnected(d *hkontroller.Device) {
 	defer func() {
 		l.mu.Lock()
 		delete(l.connecting, d)
+		delete(l.watches, d)
 		l.mu.Unlock()
 	}()
 
-	for d.IsPaired() && d.IsDiscovered() {
-		if !d.IsVerified() {
-			if err := d.PairVerify(); err != nil {
-				l.printf("%s: pair-verify: %v\n", d.CurrentName(), err)
-				time.Sleep(reconnectTimeout)
-				continue
+	d.KeepConnected(context.Background(), func() {
+		l.printf("%s: connected\n", d.CurrentName())
+		done := d.Done()
+		go l.watchChanges(d, done)
+		go func() {
+			<-done
+			if d.IsPaired() {
+				l.printf("%s: connection closed: %v\n", d.CurrentName(), d.CloseReason())
 			}
-			l.printf("%s: connected\n", d.CurrentName())
-			go l.watchChanges(d, d.Done())
+		}()
+		l.rewatch(d)
+	}, func(err error) {
+		l.printf("%s: pair-verify: %v\n", d.CurrentName(), err)
+	})
+}
+
+// rewatch subscribes again to events watched before reconnect.
+func (l *cli) rewatch(d *hkontroller.Device) {
+	l.mu.Lock()
+	ww := append([]watch(nil), l.watches[d]...)
+	l.mu.Unlock()
+	if len(ww) == 0 {
+		return
+	}
+	if err := d.GetAccessories(); err != nil {
+		l.printf("%s: loading accessories: %v\n", d.CurrentName(), err)
+		return
+	}
+	for _, w := range ww {
+		if err := l.subscribe(d, w); err != nil {
+			l.printf("%s: watch again: %v\n", d.CurrentName(), err)
 		}
-		<-d.Done()
-		if d.IsPaired() {
-			l.printf("%s: connection closed: %v\n", d.CurrentName(), d.CloseReason())
-		}
-		time.Sleep(reconnectTimeout)
 	}
 }
 
@@ -380,8 +410,7 @@ func (l *cli) cmdVerify([]string) error {
 	if err := d.PairVerify(); err != nil {
 		return err
 	}
-	l.printf("connected\n")
-	go l.watchChanges(d, d.Done())
+	// it tells when connected
 	go l.keepConnected(d)
 	return nil
 }
@@ -558,23 +587,34 @@ func (l *cli) cmdPut(args []string) error {
 	return nil
 }
 
-func (l *cli) cmdWatch(args []string) error {
-	d := l.selected()
+// parseWatch parses <aid> <iid> | <aid> | all.
+func parseWatch(args []string) (watch, error) {
+	switch {
+	case len(args) == 1 && args[0] == "all":
+		return watch{-1, -1}, nil
+	case len(args) == 1:
+		aid, err := strconv.ParseUint(args[0], 10, 64)
+		if err != nil {
+			return watch{}, fmt.Errorf("aid: %w", err)
+		}
+		return watch{int64(aid), -1}, nil
+	default:
+		aid, iid, err := parseIds(args)
+		return watch{int64(aid), int64(iid)}, err
+	}
+}
+
+// subscribe prints events of w until channel is closed.
+func (l *cli) subscribe(d *hkontroller.Device, w watch) error {
 	var ch <-chan hkontroller.CharacteristicUpdate
 	var err error
 	switch {
-	case len(args) == 1 && args[0] == "all":
+	case w.aid == -1:
 		ch, err = d.SubscribeToAllEvents()
-	case len(args) == 1:
-		var aid uint64
-		if aid, err = strconv.ParseUint(args[0], 10, 64); err == nil {
-			ch, err = d.SubscribeToAccessoryEvents(aid)
-		}
+	case w.iid == -1:
+		ch, err = d.SubscribeToAccessoryEvents(uint64(w.aid))
 	default:
-		var aid, iid uint64
-		if aid, iid, err = parseIds(args); err == nil {
-			ch, err = d.SubscribeToEvents(aid, iid)
-		}
+		ch, err = d.SubscribeToEvents(uint64(w.aid), uint64(w.iid))
 	}
 	if err != nil {
 		return err
@@ -584,30 +624,51 @@ func (l *cli) cmdWatch(args []string) error {
 			l.printf("event %s %d.%d = %v\n", d.CurrentName(), ev.Aid, ev.Iid, ev.Value)
 		}
 	}()
+	return nil
+}
+
+func (l *cli) cmdWatch(args []string) error {
+	w, err := parseWatch(args)
+	if err != nil {
+		return err
+	}
+	d := l.selected()
+	if err := l.subscribe(d, w); err != nil {
+		return err
+	}
+	l.mu.Lock()
+	l.watches[d] = append(l.watches[d], w)
+	l.mu.Unlock()
 	l.printf("watching\n")
 	return nil
 }
 
 func (l *cli) cmdUnwatch(args []string) error {
+	w, err := parseWatch(args)
+	if err != nil {
+		return err
+	}
 	d := l.selected()
-	var err error
 	switch {
-	case len(args) == 1 && args[0] == "all":
+	case w.aid == -1:
 		err = d.UnsubscribeFromAllEvents()
-	case len(args) == 1:
-		var aid uint64
-		if aid, err = strconv.ParseUint(args[0], 10, 64); err == nil {
-			err = d.UnsubscribeFromAccessoryEvents(aid)
-		}
+	case w.iid == -1:
+		err = d.UnsubscribeFromAccessoryEvents(uint64(w.aid))
 	default:
-		var aid, iid uint64
-		if aid, iid, err = parseIds(args); err == nil {
-			err = d.UnsubscribeFromEvents(aid, iid)
-		}
+		err = d.UnsubscribeFromEvents(uint64(w.aid), uint64(w.iid))
 	}
 	if err != nil {
 		return err
 	}
+	l.mu.Lock()
+	var kept []watch
+	for _, ww := range l.watches[d] {
+		if !ww.within(w) {
+			kept = append(kept, ww)
+		}
+	}
+	l.watches[d] = kept
+	l.mu.Unlock()
 	l.printf("stopped watching\n")
 	return nil
 }
