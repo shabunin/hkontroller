@@ -2,7 +2,6 @@ package hkontroller
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -622,71 +621,18 @@ func (d *Device) GetAccessories() error {
 
 // GetCharacteristic sends GET /characteristic request and return characteristic description and value.
 func (d *Device) GetCharacteristic(aid uint64, cid uint64) (CharacteristicDescription, error) {
-	ep := fmt.Sprintf("/characteristics?id=%d.%d", aid, cid)
-
-	ctx, cancel := context.WithTimeout(context.Background(), reqTimeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, "GET", ep, nil)
-
+	res, err := d.GetCharacteristics(CharacteristicId{aid, cid})
 	if err != nil {
 		return CharacteristicDescription{}, err
 	}
-
-	res, err := d.doRequest(req)
-	if err != nil {
-		return CharacteristicDescription{}, err
-	}
-
-	all, err := io.ReadAll(res.Body)
-	if err != nil {
-		return CharacteristicDescription{}, err
-	}
-	if err := responseError(res, all); err != nil {
-		return CharacteristicDescription{}, err
-	}
-
-	type responsePayload struct {
-		Characteristics []CharacteristicDescription `json:"characteristics"`
-	}
-
-	var chrs responsePayload
-	err = json.Unmarshal(all, &chrs)
-	if err != nil {
-		return CharacteristicDescription{}, err
-	}
-
-	for _, c := range chrs.Characteristics {
-		if c.Aid == aid && c.Iid == cid {
-			return c, nil
-		}
-	}
-
-	return CharacteristicDescription{}, errors.New("wrong response")
+	return res[0], nil
 }
 
 // PutCharacteristic makes PUT /characteristic request to control characteristic value.
 func (d *Device) PutCharacteristic(aid uint64, cid uint64, val interface{}) error {
-
-	type putPayload struct {
-		Cs []CharacteristicPut `json:"characteristics"`
-	}
-
-	c := putPayload{Cs: []CharacteristicPut{{Aid: aid, Iid: cid, Value: val}}}
-	b, err := json.Marshal(c)
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), reqTimeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, "PUT", "/characteristics", bytes.NewReader(b))
-	if err != nil {
-		return err
-	}
-
-	res, err := d.doRequest(req)
+	res, err := d.putCharacteristics(characteristicsPut{
+		Cs: []CharacteristicPut{{Aid: aid, Iid: cid, Value: val}},
+	})
 	if err != nil {
 		return err
 	}
