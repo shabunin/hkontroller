@@ -47,7 +47,7 @@ func (d *Device) verifyIfNeeded() error {
 var verifyDevice = (*Device).pairVerify
 
 // pairVerify must be called with d.pairMu held.
-func (d *Device) pairVerify() error {
+func (d *Device) pairVerify() (err error) {
 	if !d.IsPaired() {
 		return errors.New("pair device before verifying")
 	}
@@ -64,6 +64,13 @@ func (d *Device) pairVerify() error {
 	if cc == nil {
 		return errConnClosed
 	}
+	// connection without session is no use, next attempt starts
+	// with new one, and it doesn't hold one of few connections of accessory
+	defer func() {
+		if err != nil {
+			d.closeConn(cc, err)
+		}
+	}()
 
 	localPublic, localPrivate := curve25519.GenerateKeyPair()
 

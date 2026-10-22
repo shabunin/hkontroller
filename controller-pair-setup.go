@@ -269,7 +269,7 @@ func (d *Device) pairSetupM5(clientSession *pairSetupClientSession) error {
 	return nil
 }
 
-func (d *Device) PairSetup(pin string) error {
+func (d *Device) PairSetup(pin string) (err error) {
 	d.pairMu.Lock()
 	defer d.pairMu.Unlock()
 
@@ -279,6 +279,13 @@ func (d *Device) PairSetup(pin string) error {
 			return err
 		}
 	}
+	cc := d.conn()
+	defer func() {
+		// unencrypted connection is closed after failure like in PairVerify
+		if err != nil && !d.IsVerified() {
+			d.closeConn(cc, err)
+		}
+	}()
 
 	clientSession, err := d.pairSetupM1(pin)
 	if err != nil {
