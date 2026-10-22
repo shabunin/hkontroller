@@ -668,7 +668,6 @@ func TestSetVerifiedOnClosedConnection(t *testing.T) {
 	}
 }
 
-// pair-verify requests from several goroutines must share one connection
 // connCounter counts connections of fake accessory, open and all.
 type connCounter struct {
 	mu                  sync.Mutex
@@ -695,6 +694,12 @@ func pairingAccessory(t *testing.T, tlv []byte) (*Device, *connCounter) {
 			conn, err := ln.Accept()
 			if err != nil {
 				return
+			}
+			// client closes previous connection before dialing this one,
+			// but accessory sees it closed only when its read returns
+			deadline := time.Now().Add(time.Second)
+			for _, open, _ := counter.counts(); open > 0 && time.Now().Before(deadline); _, open, _ = counter.counts() {
+				time.Sleep(time.Millisecond)
 			}
 			counter.mu.Lock()
 			counter.accepted++
