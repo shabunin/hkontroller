@@ -16,7 +16,7 @@ require (
 
 require (
 	github.com/miekg/dns v1.1.73 // indirect
-	github.com/shabunin/dnssd v1.2.15-0.20261021211402-ea684f33c664
+	github.com/shabunin/dnssd v1.2.15-0.20261022051326-eca783f89e9b
 	golang.org/x/net v0.61.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 )
