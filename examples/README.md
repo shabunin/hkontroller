@@ -18,6 +18,7 @@ Commands complete with Tab, history is under arrow keys, Ctrl-C or Ctrl-D quit.
   help                                     show commands
   devices                                  list devices
   use [no|name|id]                         select device, without argument unselect
+  info                                     show how device is advertised: address and TXT record
   pair <pin>                               pair device, e.g. pair 031-45-154
   verify                                   establish encrypted session again
   unpair                                   remove pairing from accessory and forget it

@@ -91,8 +91,9 @@ func onConnected(d *hkontroller.Device) {
 **Discovery.** `StartDiscovery` browses `_hap._tcp` with mDNS and sends devices
 to a channel when they appear and disappear. Devices are identified by accessory id,
 so a renamed accessory keeps its pairing: `Name` is the name the device was created with,
-`CurrentName` is the name it's advertised with now. When an accessory's configuration
-number changes, its accessories are loaded again (`AccessoriesChanged` tells about it),
+`CurrentName` is the name it's advertised with now. `Advertisement` gives its addresses
+and TXT record, e.g. model and category. When an accessory's configuration number changes,
+its accessories are loaded again (`AccessoriesChanged` tells about it),
 and events are enabled for new characteristics that are subscribed to.
 
 **Pairing.**

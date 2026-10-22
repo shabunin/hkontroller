@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -265,15 +266,32 @@ func (d *Device) currentNameLocked() string {
 	return d.Name
 }
 
-// GetDnssdEntry returns dnssd entry with IPs of all interfaces device is advertised on.
-func (d *Device) GetDnssdEntry() dnssd.BrowseEntry {
-	var res dnssd.BrowseEntry
-	for i, e := range d.entries() {
+// Advertisement is how device is advertised with mDNS.
+type Advertisement struct {
+	Name string   // service instance name, same as CurrentName
+	Host string   // host name, without .local domain
+	Port int      // HAP port
+	IPs  []net.IP // addresses on all interfaces device is advertised on
+	// Text is TXT record: "id" accessory id, "md" model, "ci" category,
+	// "c#" configuration number, "sf" status flags (1 means not paired) and others.
+	Text map[string]string
+}
+
+// Advertisement returns how device is advertised now, with IPs of all interfaces.
+// It is zero if device is not discovered.
+func (d *Device) Advertisement() Advertisement {
+	entries := d.entries()
+	slices.SortFunc(entries, func(a, b dnssd.BrowseEntry) int { return strings.Compare(a.IfaceName, b.IfaceName) })
+	var res Advertisement
+	for i, e := range entries {
 		if i == 0 {
-			res = e
-			continue
+			res = Advertisement{Name: e.Name, Host: e.Host, Port: e.Port, Text: e.Text}
 		}
-		res.IPs = append(res.IPs, e.IPs...)
+		for _, ip := range e.IPs {
+			if !slices.ContainsFunc(res.IPs, ip.Equal) {
+				res.IPs = append(res.IPs, ip)
+			}
+		}
 	}
 	return res
 }
