@@ -967,6 +967,55 @@ func TestPairSetupErrorWithSalt(t *testing.T) {
 	}
 }
 
+func readBody(t *testing.T, res *http.Response, err error) string {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func TestPairingResponsesInSingleWrite(t *testing.T) {
+	defer func(old time.Duration) { pairingTimeout = old }(pairingTimeout)
+	pairingTimeout = 200 * time.Millisecond
+
+	first := true
+	d := newPairingTestDevice(t, func(*http.Request, string) string {
+		if first {
+			first = false
+			return tlvResponse([]byte("a")) + tlvResponse([]byte("b"))
+		}
+		return ""
+	})
+	for _, want := range []string{"a", "b"} {
+		res, err := d.doPost("/pair-verify", HTTPContentTypePairingTLV8, strings.NewReader(""))
+		if got := readBody(t, res, err); got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	}
+}
+
+func TestEventRightAfterPairingResponse(t *testing.T) {
+	d := newPairingTestDevice(t, func(*http.Request, string) string {
+		return tlvResponse([]byte("a")) + eventMessage(1, 2, 7)
+	})
+	res, err := d.doPost("/pair-verify", HTTPContentTypePairingTLV8, strings.NewReader(""))
+	readBody(t, res, err)
+
+	events := make(chan struct{}, 1)
+	d.cc.SetEventCallback(func(*http.Response) { events <- struct{}{} })
+	d.startBackgroundRead(d.cc)
+	select {
+	case <-events:
+	case <-time.After(time.Second):
+		t.Fatal("event read together with pairing response is lost")
+	}
+}
+
 func TestReloadEnablesEventsForNewAccessory(t *testing.T) {
 	var mu sync.Mutex
 	body := `{"accessories":[{"aid":1,"services":[{"iid":1,"type":"49","characteristics":[

@@ -140,6 +140,10 @@ type conn struct {
 	readBuf   *bytes.Buffer // decrypted data of last packet not read yet
 	bufReader *bufio.Reader
 
+	// rd reads responses and events. Pairing requests and background loop share it,
+	// so bytes buffered by one are not lost for the other.
+	rd *bufio.Reader
+
 	// backgroundStop is nil until startLoop is called, then closed when loop stops
 	bmu            sync.Mutex
 	backgroundStop chan struct{}
@@ -163,7 +167,9 @@ type responseResult struct {
 }
 
 func newConn(c net.Conn) *conn {
-	return &conn{Conn: c, done: make(chan struct{})}
+	cc := &conn{Conn: c, done: make(chan struct{})}
+	cc.rd = bufio.NewReader(cc)
+	return cc
 }
 
 func (c *conn) close() {
@@ -309,7 +315,7 @@ func (c *conn) Read(b []byte) (int, error) {
 }
 
 func (c *conn) loop() error {
-	rd := bufio.NewReader(c)
+	rd := c.rd
 	for !c.isClosed() {
 		b, err := rd.Peek(len(eventHeader)) // len of EVENT string
 		if err != nil {

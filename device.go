@@ -1,7 +1,6 @@
 package hkontroller
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -157,8 +156,7 @@ func (r *roundTripper) readDirect(req *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 
-	rd := bufio.NewReader(r.cc)
-	res, err := http.ReadResponse(rd, req)
+	res, err := http.ReadResponse(r.cc.rd, req)
 	if err != nil {
 		return nil, err
 	}
