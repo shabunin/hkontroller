@@ -97,8 +97,8 @@ func TestDiscoveryPortChange(t *testing.T) {
 	if _, lost := c.onDnssdRemove(testEntry("eth0", 51827)); lost {
 		t.Fatal("removal of old port should not lose device")
 	}
-	if e := dd.GetDnssdEntry(); e.Port != 40000 {
-		t.Fatalf("expected new port, got %d", e.Port)
+	if a := dd.Advertisement(); a.Port != 40000 {
+		t.Fatalf("expected new port, got %d", a.Port)
 	}
 }
 
@@ -118,17 +118,44 @@ func TestDialAddrs(t *testing.T) {
 	}
 }
 
-func TestDnssdEntryIsCopied(t *testing.T) {
+func TestAdvertisementIsCopied(t *testing.T) {
 	c := newTestController(t)
 	e := testEntry("eth0", 51827, "192.168.1.2", "fe80::1")
+	e.Text = map[string]string{"md": "Bridge"}
 	dd, _ := c.onDnssdAdd(e)
 
-	got := dd.GetDnssdEntry()
+	got := dd.Advertisement()
 	got.IPs[0] = net.ParseIP("10.0.0.1")
+	got.Text["md"] = "changed"
 	e.IPs[1] = net.ParseIP("10.0.0.2")
 
-	if ips := dd.GetDnssdEntry().IPs; ips[0].String() != "192.168.1.2" || ips[1].String() != "fe80::1" {
-		t.Fatalf("device entry was modified from outside: %v", ips)
+	a := dd.Advertisement()
+	if a.IPs[0].String() != "192.168.1.2" || a.IPs[1].String() != "fe80::1" || a.Text["md"] != "Bridge" {
+		t.Fatalf("device advertisement was modified from outside: %+v", a)
+	}
+}
+
+func TestAdvertisementOnSeveralInterfaces(t *testing.T) {
+	c := newTestController(t)
+	c.onDnssdAdd(testEntry("wlan0", 51827, "192.168.1.2", "fe80::2"))
+	dd, _ := c.onDnssdAdd(testEntry("eth0", 51827, "192.168.1.2", "fe80::1"))
+
+	// same ip4 on both interfaces listed once, interfaces in name order
+	want := []string{"192.168.1.2", "fe80::1", "fe80::2"}
+	a := dd.Advertisement()
+	var got []string
+	for _, ip := range a.IPs {
+		got = append(got, ip.String())
+	}
+	if !reflect.DeepEqual(got, want) || a.Port != 51827 {
+		t.Fatalf("got %v port %d, want %v", got, a.Port, want)
+	}
+}
+
+func TestAdvertisementOfUndiscoveredDevice(t *testing.T) {
+	d := newDevice("test", nil, "ctrl", nil, nil)
+	if a := d.Advertisement(); a.Name != "" || a.IPs != nil || a.Text != nil {
+		t.Fatalf("expected zero advertisement, got %+v", a)
 	}
 }
 
@@ -521,8 +548,8 @@ func TestRenameWhileOnline(t *testing.T) {
 	if _, lost := c.onDnssdRemove(entryWithId("A", "AA:BB")); lost {
 		t.Fatal("removal of old name should not lose device")
 	}
-	if !dd.IsDiscovered() || dd.GetDnssdEntry().Name != "B" {
-		t.Fatalf("device should be advertised as B: %+v", dd.GetDnssdEntry())
+	if !dd.IsDiscovered() || dd.Advertisement().Name != "B" {
+		t.Fatalf("device should be advertised as B: %+v", dd.Advertisement())
 	}
 }
 

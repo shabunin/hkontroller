@@ -14,7 +14,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -304,6 +306,7 @@ func (l *cli) initCommands() {
 		{"help", "", "show commands", false, l.cmdHelp},
 		{"devices", "", "list devices", false, l.cmdDevices},
 		{"use", "[no|name|id]", "select device, without argument unselect", false, l.cmdUse},
+		{"info", "", "show how device is advertised: address and TXT record", true, l.cmdInfo},
 		{"pair", "<pin>", "pair device, e.g. pair 031-45-154", true, l.cmdPair},
 		{"verify", "", "establish encrypted session again", true, l.cmdVerify},
 		{"unpair", "", "remove pairing from accessory and forget it", true, l.cmdUnpair},
@@ -450,6 +453,18 @@ func (l *cli) cmdPairings([]string) error {
 			perm = "admin"
 		}
 		l.printf("  %-40s %-6s %x\n", p.Id, perm, p.PublicKey)
+	}
+	return nil
+}
+
+func (l *cli) cmdInfo([]string) error {
+	a := l.selected().Advertisement()
+	if a.Name == "" {
+		return errors.New("device is not discovered")
+	}
+	l.printf("%s at %s.local:%d %v\n", a.Name, a.Host, a.Port, a.IPs)
+	for _, k := range slices.Sorted(maps.Keys(a.Text)) {
+		l.printf("  %s = %s\n", k, a.Text[k])
 	}
 	return nil
 }
