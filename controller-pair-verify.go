@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"github.com/shabunin/hkontroller/chacha20poly1305"
-	"github.com/shabunin/hkontroller/curve25519"
-	"github.com/shabunin/hkontroller/ed25519"
-	"github.com/shabunin/hkontroller/hkdf"
-	"github.com/shabunin/hkontroller/tlv8"
+	"github.com/shabunin/hkontroller/internal/chacha20poly1305"
+	"github.com/shabunin/hkontroller/internal/curve25519"
+	"github.com/shabunin/hkontroller/internal/ed25519"
+	"github.com/shabunin/hkontroller/internal/hkdf"
+	"github.com/shabunin/hkontroller/internal/tlv8"
 	"io"
 )
 
@@ -115,7 +115,10 @@ func (d *Device) pairVerify() (err error) {
 	remotePubk := [32]byte{}
 	copy(remotePubk[:], m2.PublicKey)
 
-	sharedKey := curve25519.SharedSecret(localPrivate, remotePubk)
+	sharedKey, err := curve25519.SharedSecret(localPrivate, remotePubk)
+	if err != nil {
+		return &PairVerifyError{"M2", err}
+	}
 
 	encKey, err := hkdf.Sha512(
 		sharedKey[:],

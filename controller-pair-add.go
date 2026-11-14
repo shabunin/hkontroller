@@ -6,7 +6,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/shabunin/hkontroller/tlv8"
+	"github.com/shabunin/hkontroller/internal/tlv8"
 )
 
 type pairAddReqPayload struct {

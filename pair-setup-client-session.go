@@ -1,7 +1,7 @@
 package hkontroller
 
 import (
-	"github.com/shabunin/hkontroller/hkdf"
+	"github.com/shabunin/hkontroller/internal/hkdf"
 	"github.com/tadglines/go-pkgs/crypto/srp"
 
 	"crypto/sha512"
