@@ -1,5 +1,8 @@
 # hkontroller
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/shabunin/hkontroller.svg)](https://pkg.go.dev/github.com/shabunin/hkontroller)
+[![test](https://github.com/shabunin/hkontroller/actions/workflows/test.yml/badge.svg)](https://github.com/shabunin/hkontroller/actions/workflows/test.yml)
+
 HomeKit controller library in Go: discover HomeKit accessories on the local network,
 pair with them, read and write characteristics and receive events,
 like the Home app does.
@@ -148,7 +151,7 @@ log.Debug.Enable()
 ## Credits
 
 Derived from [`github.com/brutella/hap`](https://github.com/brutella/hap),
-library to create HomeKit accessories.
+library to create HomeKit accessories, see [NOTICE](NOTICE).
 
 ## License
 

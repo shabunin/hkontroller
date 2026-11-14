@@ -1,0 +1,7 @@
+hkontroller
+Copyright 2022-2026 Vladimir Shabunin
+
+This product is derived from hap (https://github.com/brutella/hap),
+Copyright 2022 Matthias Hochgatterer, licensed under the Apache License 2.0.
+The pairing, session, TLV8 and crypto code was adapted from it
+for the controller side of the protocol.
